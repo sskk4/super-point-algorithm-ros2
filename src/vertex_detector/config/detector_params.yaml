@@ -1,0 +1,30 @@
+# Debug configuration for vertex detector
+# Obniżone progi do debugowania
+
+vertex_detector:
+  ros__parameters:
+    # Model configuration
+    model_path: "models/superpoint_320.onnx"
+    use_fp16: true
+    
+    # Detection thresholds - OBNIŻONE DO DEBUGOWANIA
+    confidence_threshold: 0.2  # Było 0.90 - teraz bardzo niski próg
+    top_k: 500  # Było 200 - zwiększone
+    nms_radius: 20.0
+    max_vertices: 1000  # Było 500 - zwiększone
+    
+    # Performance settings
+    frame_skip_interval: 0  # Przetwarzaj każdą klatkę do debugowania
+    scale_factor: 1.0
+    auto_adjust_quality: false
+    target_fps: 30.0
+    
+    # ROI (Region of Interest) - wyłączone
+    use_roi: false
+    roi_x: 0
+    roi_y: 0
+    roi_width: 640
+    roi_height: 480
+    
+    # Visualization - WŁĄCZONE
+    enable_debug_visualization: true
