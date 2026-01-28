@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lidar Point Cloud Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        
+        #container {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+            z-index: 100;
+        }
+        
+        #stats {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #444;
+        }
+        
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+        
+        .stat-label {
+            color: #888;
+            margin-right: 15px;
+        }
+        
+        .stat-value {
+            color: #0f0;
+            font-weight: bold;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            backdrop-filter: blur(10px);
+            z-index: 100;
+        }
+        
+        .control-group {
+            margin: 10px 0;
+        }
+        
+        .control-label {
+            display: block;
+            margin-bottom: 5px;
+            color: #888;
+        }
+        
+        input[type="range"] {
+            width: 150px;
+        }
+        
+        button {
+            background: #2196F3;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px 0;
+            width: 100%;
+        }
+        
+        button:hover {
+            background: #1976D2;
+        }
+        
+        #connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #f44336;
+            margin-right: 8px;
+        }
+        
+        #connection-status.connected {
+            background: #4CAF50;
+        }
+        
+        .grid-toggle {
+            background: #444;
+        }
+        
+        .grid-toggle.active {
+            background: #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    
+    <div id="info">
+        <h2>
+            <span id="connection-status"></span>
+            Lidar Point Cloud Viewer
+        </h2>
+        <div id="stats">
+            <div class="stat-row">
+                <span class="stat-label">Punkty:</span>
+                <span class="stat-value" id="point-count">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">FPS:</span>
+                <span class="stat-value" id="fps">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Ostatnia aktualizacja:</span>
+                <span class="stat-value" id="last-update">-</span>
+            </div>
+        </div>
+    </div>
+    
+    <div id="controls">
+        <h3>Kontrolki</h3>
+        <div class="control-group">
+            <label class="control-label">
+                Rozmiar punktu: <span id="point-size-value">2</span>
+            </label>
+            <input type="range" id="point-size" min="1" max="10" value="2" step="0.5">
+        </div>
+        <div class="control-group">
+            <button id="toggle-grid" class="grid-toggle">Pokaż siatkę</button>
+            <button id="reset-camera">Resetuj kamerę</button>
+            <button id="toggle-axes">Pokaż osie</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        // Inicjalizacja Three.js
+        let scene, camera, renderer, pointCloud, controls;
+        let socket;
+        let gridHelper, axesHelper;
+        let frameCount = 0;
+        let lastTime = Date.now();
+        
+        function init() {
+            // Scena
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            
+            // Kamera
+            camera = new THREE.PerspectiveCamera(
+                75,
+                window.innerWidth / window.innerHeight,
+                0.1,
+                1000
+            );
+            camera.position.set(10, 10, 10);
+            camera.lookAt(0, 0, 0);
+            
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            // Oświetlenie
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
+            directionalLight.position.set(10, 10, 10);
+            scene.add(directionalLight);
+            
+            // Siatka
+            gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+            gridHelper.visible = false;
+            scene.add(gridHelper);
+            
+            // Osie współrzędnych
+            axesHelper = new THREE.AxesHelper(5);
+            axesHelper.visible = false;
+            scene.add(axesHelper);
+            
+            // Kontrolki orbity (uproszczone - bez OrbitControls)
+            setupMouseControls();
+            
+            // Obsługa zmiany rozmiaru okna
+            window.addEventListener('resize', onWindowResize, false);
+            
+            // Kontrolki UI
+            setupUIControls();
+            
+            // WebSocket
+            connectWebSocket();
+            
+            // Rozpocznij renderowanie
+            animate();
+        }
+        
+        function setupMouseControls() {
+            let isDragging = false;
+            let previousMousePosition = { x: 0, y: 0 };
+            let cameraRotation = { x: 0, y: 0 };
+            let cameraDistance = 15;
+            
+            renderer.domElement.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+            });
+            
+            renderer.domElement.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                
+                const deltaX = e.clientX - previousMousePosition.x;
+                const deltaY = e.clientY - previousMousePosition.y;
+                
+                cameraRotation.y += deltaX * 0.005;
+                cameraRotation.x += deltaY * 0.005;
+                
+                // Ogranicz rotację w pionie
+                cameraRotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, cameraRotation.x));
+                
+                updateCameraPosition();
+                
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+            });
+            
+            renderer.domElement.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+            
+            renderer.domElement.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                cameraDistance += e.deltaY * 0.01;
+                cameraDistance = Math.max(1, Math.min(100, cameraDistance));
+                updateCameraPosition();
+            });
+            
+            function updateCameraPosition() {
+                camera.position.x = cameraDistance * Math.cos(cameraRotation.x) * Math.sin(cameraRotation.y);
+                camera.position.y = cameraDistance * Math.sin(cameraRotation.x);
+                camera.position.z = cameraDistance * Math.cos(cameraRotation.x) * Math.cos(cameraRotation.y);
+                camera.lookAt(0, 0, 0);
+            }
+        }
+        
+        function setupUIControls() {
+            // Rozmiar punktu
+            const pointSizeSlider = document.getElementById('point-size');
+            const pointSizeValue = document.getElementById('point-size-value');
+            pointSizeSlider.addEventListener('input', (e) => {
+                const size = parseFloat(e.target.value);
+                pointSizeValue.textContent = size;
+                if (pointCloud && pointCloud.material) {
+                    pointCloud.material.size = size;
+                }
+            });
+            
+            // Siatka
+            document.getElementById('toggle-grid').addEventListener('click', function() {
+                gridHelper.visible = !gridHelper.visible;
+                this.classList.toggle('active');
+            });
+            
+            // Reset kamery
+            document.getElementById('reset-camera').addEventListener('click', () => {
+                camera.position.set(10, 10, 10);
+                camera.lookAt(0, 0, 0);
+            });
+            
+            // Osie
+            document.getElementById('toggle-axes').addEventListener('click', function() {
+                axesHelper.visible = !axesHelper.visible;
+                this.classList.toggle('active');
+            });
+        }
+        
+        function connectWebSocket() {
+            socket = io.connect('http://' + document.domain + ':' + location.port);
+            
+            socket.on('connect', () => {
+                console.log('Połączono z serwerem');
+                document.getElementById('connection-status').classList.add('connected');
+            });
+            
+            socket.on('disconnect', () => {
+                console.log('Rozłączono z serwerem');
+                document.getElementById('connection-status').classList.remove('connected');
+            });
+            
+            socket.on('pointcloud_update', (data) => {
+                updatePointCloud(data);
+            });
+            
+            // Pobierz początkowe dane
+            fetch('/api/pointcloud')
+                .then(response => response.json())
+                .then(data => updatePointCloud(data));
+        }
+        
+        function updatePointCloud(data) {
+            if (!data.points || data.points.length === 0) return;
+            
+            // Usuń starą chmurę punktów
+            if (pointCloud) {
+                scene.remove(pointCloud);
+                pointCloud.geometry.dispose();
+                pointCloud.material.dispose();
+            }
+            
+            // Stwórz nową geometrię
+            const geometry = new THREE.BufferGeometry();
+            
+            // Konwertuj dane na Float32Array
+            const positions = new Float32Array(data.points.length * 3);
+            const colors = new Float32Array(data.colors.length * 3);
+            
+            for (let i = 0; i < data.points.length; i++) {
+                positions[i * 3] = data.points[i][0];
+                positions[i * 3 + 1] = data.points[i][1];
+                positions[i * 3 + 2] = data.points[i][2];
+                
+                colors[i * 3] = data.colors[i][0] / 255;
+                colors[i * 3 + 1] = data.colors[i][1] / 255;
+                colors[i * 3 + 2] = data.colors[i][2] / 255;
+            }
+            
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            
+            // Materiał
+            const material = new THREE.PointsMaterial({
+                size: parseFloat(document.getElementById('point-size').value),
+                vertexColors: true,
+                sizeAttenuation: true
+            });
+            
+            // Stwórz chmurę punktów
+            pointCloud = new THREE.Points(geometry, material);
+            scene.add(pointCloud);
+            
+            // Aktualizuj statystyki
+            document.getElementById('point-count').textContent = data.points.length;
+            const now = new Date(data.timestamp * 1000);
+            document.getElementById('last-update').textContent = now.toLocaleTimeString();
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Oblicz FPS
+            frameCount++;
+            const currentTime = Date.now();
+            if (currentTime - lastTime >= 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // Uruchom aplikację
+        init();
+    </script>
+</body>
+</html>
