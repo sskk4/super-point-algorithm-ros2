@@ -1,10 +1,14 @@
-from pxr import UsdPhysics, Gf
+from pxr import UsdPhysics, UsdGeom, Gf
 import omni.usd
 import omni.kit.commands
 
+# =====================================================
+# KONFIGURACJA
+# =====================================================
+
 stage = omni.usd.get_context().get_stage()
 
-TRACK_ROOT = "/World/Robot/Track"
+TRACK_ROOT = "/World/g1"
 JOINT_ROOT = f"{TRACK_ROOT}/Joints"
 PREFIX = "DEFAULT_"
 
@@ -19,7 +23,9 @@ SEQUENCE = [
     118, 2
 ]
 
-# --------------------------------------------------
+# =====================================================
+# FUNKCJE POMOCNICZE
+# =====================================================
 
 def ensure_xform(path):
     if not stage.GetPrimAtPath(path).IsValid():
@@ -29,9 +35,26 @@ def ensure_xform(path):
             prim_type="Xform"
         )
 
-ensure_xform(JOINT_ROOT)
+def ensure_rigid_body(xform_prim):
+    if not xform_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        UsdPhysics.RigidBodyAPI.Apply(xform_prim)
 
-# --------------------------------------------------
+    # masa – KLUCZOWA dla stabilności
+    mass_api = UsdPhysics.MassAPI.Apply(xform_prim)
+    if not mass_api.GetMassAttr():
+        mass_api.CreateMassAttr(0.2)
+
+def ensure_collision(xform_prim):
+    for c in xform_prim.GetChildren():
+        if c.GetTypeName() == "Mesh":
+            if not c.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(c)
+
+# =====================================================
+# START
+# =====================================================
+
+ensure_xform(JOINT_ROOT)
 
 created = 0
 skipped = 0
@@ -43,39 +66,52 @@ for i in range(len(SEQUENCE)):
     path_a = f"{TRACK_ROOT}/{PREFIX}{a}"
     path_b = f"{TRACK_ROOT}/{PREFIX}{b}"
 
-    if not stage.GetPrimAtPath(path_a).IsValid():
-        skipped += 1
-        continue
-    if not stage.GetPrimAtPath(path_b).IsValid():
+    prim_a = stage.GetPrimAtPath(path_a)
+    prim_b = stage.GetPrimAtPath(path_b)
+
+    if not prim_a.IsValid() or not prim_b.IsValid():
         skipped += 1
         continue
 
+    # ✅ RigidBody na XFORMIE
+    ensure_rigid_body(prim_a)
+    ensure_rigid_body(prim_b)
+
+    # ✅ Collision na MESHU
+    ensure_collision(prim_a)
+    ensure_collision(prim_b)
+
+    # === JOINT ===
     joint_path = f"{JOINT_ROOT}/joint_{a}_to_{b}"
-
     omni.kit.commands.execute(
         "CreatePrim",
         prim_path=joint_path,
         prim_type="PhysicsRevoluteJoint"
     )
 
-    joint = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(joint_path))
+    joint_prim = stage.GetPrimAtPath(joint_path)
+    joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    joint.CreateBody0Rel().SetTargets([path_a])
-    joint.CreateBody1Rel().SetTargets([path_b])
+    # 🔑 NAJWAŻNIEJSZE: bodyRel → XFORM
+    joint.CreateBody0Rel().SetTargets([prim_a.GetPath()])
+    joint.CreateBody1Rel().SetTargets([prim_b.GetPath()])
 
-    # 🔑 KORZYSTAMY Z PIVOTÓW
+    # 🔑 localPos = (0,0,0) = PIVOT
     joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
 
-    # Oś obrotu – DOPASUJ jeśli potrzeba
+    # OŚ OBROTU – dopasuj jeśli trzeba
     joint.CreateAxisAttr().Set("X")
 
-    # Limity
+    # LIMITY
     joint.CreateLowerLimitAttr(-30.0)
     joint.CreateUpperLimitAttr(30.0)
 
+    # 🔥 WYŁĄCZ KOLIZJE MIĘDZY OGNIWAMI
+    joint.CreateCollisionEnabledAttr(False)
+
     created += 1
 
-print(f"\n✅ GOTOWE")
-print(f"   ✔️ Jointy utworzone: {created}")
-print(f"   ⚠️ Pominięte: {skipped}")
+print("\n✅ GOTOWE")
+print(f"✔️ Utworzono jointów: {created}")
+print(f"⚠️ Pominięto: {skipped}")
