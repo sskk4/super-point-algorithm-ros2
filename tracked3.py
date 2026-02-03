@@ -82,17 +82,17 @@ for i in range(len(SEQUENCE)):
         continue
 
     # === WYMUSZ RIGID BODY + COLLISION ===
-    if not UsdPhysics.RigidBodyAPI(prim0).IsValid():
+    if not prim0.HasAPI(UsdPhysics.RigidBodyAPI):
         UsdPhysics.RigidBodyAPI.Apply(prim0)
-    if not UsdPhysics.CollisionAPI(prim0).IsValid():
+    if not prim0.HasAPI(UsdPhysics.CollisionAPI):
         UsdPhysics.CollisionAPI.Apply(prim0)
 
-    if not UsdPhysics.RigidBodyAPI(prim1).IsValid():
+    if not prim1.HasAPI(UsdPhysics.RigidBodyAPI):
         UsdPhysics.RigidBodyAPI.Apply(prim1)
-    if not UsdPhysics.CollisionAPI(prim1).IsValid():
+    if not prim1.HasAPI(UsdPhysics.CollisionAPI):
         UsdPhysics.CollisionAPI.Apply(prim1)
 
-    # === WORLD POS SEGMENTÓW ===
+    # === WORLD TRANSFORM ===
     xf0 = UsdGeom.Xformable(prim0).ComputeLocalToWorldTransform(0)
     xf1 = UsdGeom.Xformable(prim1).ComputeLocalToWorldTransform(0)
 
@@ -118,15 +118,15 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    # === WORLD -> LOCAL (KLUCZ) ===
+    # === WORLD -> LOCAL ===
     local0 = xf0.GetInverse().Transform(joint_world_pos)
     local1 = xf1.GetInverse().Transform(joint_world_pos)
 
-    # === PODPIĘCIE BODIES ===
+    # === BODY RELATIONS ===
     joint.CreateBody0Rel().SetTargets([body0_path])
     joint.CreateBody1Rel().SetTargets([body1_path])
 
-    # === LOCAL POSITIONS (NIE BĘDĄ 0,0,0) ===
+    # === LOCAL POSITIONS ===
     joint.CreateLocalPos0Attr(local0)
     joint.CreateLocalPos1Attr(local1)
 
@@ -138,7 +138,7 @@ for i in range(len(SEQUENCE)):
     created += 1
 
     if created % 20 == 0:
-        print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
+        print(f"⏳ {created}/{len(SEQUENCE)} jointów")
 
 print("\n✅ ZAKOŃCZONO")
 print(f"✔️ Utworzono: {created}")
