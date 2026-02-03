@@ -3,9 +3,12 @@ import omni.usd
 import omni.kit.commands
 
 stage = omni.usd.get_context().get_stage()
-TRACK_ROOT = "/World/Robot/Track"
+
+# ===== POPRAWIONA ŚCIEŻKA =====
+TRACK_ROOT = "/World/g1/g1"  # <-- TUTAJ ZMIANA
 JOINT_ROOT = f"{TRACK_ROOT}/Joints"
 PREFIX = "DEFAULT_"
+
 SEQUENCE = [
     68, 101, 135, 35, 83, 117, 159, 67, 100, 134, 33, 82, 116, 150, 66, 99, 133, 32,
     158, 157, 156, 155, 154, 153, 152, 151, 115, 15, 74, 107, 141, 49, 90, 124, 14,
@@ -31,19 +34,20 @@ def ensure_path_exists(path):
                 prim_type="Xform"
             )
 
-def find_physics_prim(xform_path):
-    """Znajduje prim do podpięcia jointa - mesh lub Xform"""
+def find_mesh_in_xform(xform_path):
+    """
+    Struktura: /World/g1/g1/DEFAULT_68/mesh (lub bezpośrednio mesh pod Xform)
+    """
     prim = stage.GetPrimAtPath(xform_path)
     if not prim.IsValid():
         return None
     
-    # Szukaj mesh w dzieciach
+    # Szukaj mesh w bezpośrednich dzieciach
     for child in prim.GetAllChildren():
         if child.GetTypeName() in ("Mesh", "Cube", "Sphere", "Capsule", "Cylinder"):
             return child
     
-    # Jeśli nie ma mesh, użyj samego Xform
-    return prim
+    return None
 
 def ensure_rigid_body(prim):
     if prim is None:
@@ -54,10 +58,8 @@ def ensure_rigid_body(prim):
         UsdPhysics.CollisionAPI.Apply(prim)
 
 def get_world_transform(prim):
-    """Pobiera transformację world-space dla danego prim"""
     xformable = UsdGeom.Xformable(prim)
-    world_xform = xformable.ComputeLocalToWorldTransform(0)
-    return world_xform
+    return xformable.ComputeLocalToWorldTransform(0)
 
 def get_midpoint(p1, p2):
     return Gf.Vec3d(
@@ -75,39 +77,41 @@ for i in range(len(SEQUENCE)):
     n0 = SEQUENCE[i]
     n1 = SEQUENCE[(i + 1) % len(SEQUENCE)]
     
+    # Ścieżki do Xform (nie mesh!)
     xform0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
     xform1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
     
-    body0 = find_physics_prim(xform0_path)
-    body1 = find_physics_prim(xform1_path)
+    # Znajdź mesh pod każdym Xform
+    mesh0 = find_mesh_in_xform(xform0_path)
+    mesh1 = find_mesh_in_xform(xform1_path)
     
-    if body0 is None or body1 is None:
-        print(f"⚠️ Pomijam {PREFIX}{n0} lub {PREFIX}{n1} – brak prim")
+    if mesh0 is None or mesh1 is None:
+        print(f"⚠️ Pomijam {PREFIX}{n0} lub {PREFIX}{n1} – brak mesh")
+        print(f"   Sprawdzałem: {xform0_path} i {xform1_path}")
         skipped += 1
         continue
     
     # === RIGID BODY + COLLISION ===
-    ensure_rigid_body(body0)
-    ensure_rigid_body(body1)
+    ensure_rigid_body(mesh0)
+    ensure_rigid_body(mesh1)
     
-    # === OBLICZ POZYCJĘ JOINTA W WORLD SPACE ===
-    xf0 = get_world_transform(body0)
-    xf1 = get_world_transform(body1)
+    # === WORLD TRANSFORMS ===
+    xf0 = get_world_transform(mesh0)
+    xf1 = get_world_transform(mesh1)
     
     world_pos0 = xf0.ExtractTranslation()
     world_pos1 = xf1.ExtractTranslation()
     
     joint_world_pos = get_midpoint(world_pos0, world_pos1)
     
-    # === KONWERSJA NA LOCAL SPACE ===
-    # KLUCZOWA ZMIANA: Transform zamiast ExtractTranslation
+    # === LOCAL SPACE CONVERSION ===
     inv_xf0 = xf0.GetInverse()
     inv_xf1 = xf1.GetInverse()
     
     local_pos0 = inv_xf0.Transform(joint_world_pos)
     local_pos1 = inv_xf1.Transform(joint_world_pos)
     
-    # ===TWORZENIE JOINTA ===
+    # === CREATE JOINT ===
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
     omni.kit.commands.execute(
         "CreatePrim",
@@ -118,15 +122,15 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
     
-    # === RELACJE BODY ===
-    joint.CreateBody0Rel().SetTargets([body0.GetPath()])
-    joint.CreateBody1Rel().SetTargets([body1.GetPath()])
+    # === BODY RELATIONS ===
+    joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
+    joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
     
-    # === POZYCJE LOKALNE ===
+    # === LOCAL POSITIONS ===
     joint.CreateLocalPos0Attr().Set(local_pos0)
     joint.CreateLocalPos1Attr().Set(local_pos1)
     
-    # === PARAMETRY JOINTA ===
+    # === JOINT PARAMETERS ===
     joint.CreateAxisAttr("X")
     joint.CreateLowerLimitAttr(-30.0)
     joint.CreateUpperLimitAttr(30.0)
