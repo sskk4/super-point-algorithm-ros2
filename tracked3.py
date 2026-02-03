@@ -41,7 +41,7 @@ def find_mesh_prim(xform_path):
     for child in prim.GetAllChildren():
         if child.GetTypeName() in ("Mesh", "Cube", "Sphere", "Capsule", "Cylinder"):
             return child
-    return None  # jeśli nie ma mesh, zwraca None
+    return None
 
 def ensure_rigid_body(prim):
     if prim is None:
@@ -62,6 +62,76 @@ def get_midpoint(p1, p2):
         (p1[1] + p2[1]) * 0.5,
         (p1[2] + p2[2]) * 0.5,
     )
+
+def get_bounding_box_center(prim):
+    """Pobiera środek bounding box w przestrzeni świata"""
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"])
+    bound = bbox_cache.ComputeWorldBound(prim)
+    bbox = bound.ComputeAlignedBox()
+    center = (bbox.GetMin() + bbox.GetMax()) * 0.5
+    return center
+
+def get_joint_position_between_segments(prim0, prim1):
+    """
+    Znajduje optymalną pozycję jointa między dwoma segmentami.
+    W przypadku tracku, joint powinien być na krawędziach, nie w środkach.
+    """
+    # Pobierz bounding boxy obu segmentów
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"])
+    
+    bound0 = bbox_cache.ComputeWorldBound(prim0)
+    bbox0 = bound0.ComputeAlignedBox()
+    
+    bound1 = bbox_cache.ComputeWorldBound(prim1)
+    bbox1 = bound1.ComputeAlignedBox()
+    
+    # Środki bounding boxów
+    center0 = (bbox0.GetMin() + bbox0.GetMax()) * 0.5
+    center1 = (bbox1.GetMin() + bbox1.GetMax()) * 0.5
+    
+    # Wersja 1: Jeśli segmenty są ustawione wzdłuż osi Z, joint powinien być na krawędzi
+    # Zakładamy, że segmenty są obrócone tak, że oś Z wskazuje kierunek toru
+    
+    # Sprawdź czy segmenty są blisko siebie wzdłuż osi Z
+    if abs(center1[2] - center0[2]) > abs(center1[0] - center0[0]) and abs(center1[2] - center0[2]) > abs(center1[1] - center0[1]):
+        # Głównie przesunięcie w Z
+        if center1[2] > center0[2]:
+            # segment1 jest w kierunku +Z od segment0
+            joint_world = Gf.Vec3d(
+                center0[0],
+                center0[1],
+                bbox0.GetMax()[2]  # Przód segment0
+            )
+        else:
+            # segment1 jest w kierunku -Z od segment0
+            joint_world = Gf.Vec3d(
+                center0[0],
+                center0[1],
+                bbox0.GetMin()[2]  # Tył segment0
+            )
+    # Sprawdź czy segmenty są blisko siebie wzdłuż osi X
+    elif abs(center1[0] - center0[0]) > abs(center1[1] - center0[1]) and abs(center1[0] - center0[0]) > abs(center1[2] - center0[2]):
+        # Głównie przesunięcie w X
+        if center1[0] > center0[0]:
+            # segment1 jest w kierunku +X od segment0
+            joint_world = Gf.Vec3d(
+                bbox0.GetMax()[0],  # Prawa strona segment0
+                center0[1],
+                center0[2]
+            )
+        else:
+            # segment1 jest w kierunku -X od segment0
+            joint_world = Gf.Vec3d(
+                bbox0.GetMin()[0],  # Lewa strona segment0
+                center0[1],
+                center0[2]
+            )
+    else:
+        # Głównie przesunięcie w Y lub skomplikowane ułożenie
+        # Użyj środka między środkami jako fallback
+        joint_world = (center0 + center1) * 0.5
+    
+    return joint_world
 
 # ===================== START =====================
 
@@ -85,19 +155,20 @@ for i in range(len(SEQUENCE)):
         print(f"⚠️ Pomijam {path0} lub {path1}")
         continue
 
-    # --- World positions
+    # --- World positions i transformacje
     xf0 = UsdGeom.Xformable(prim0).ComputeLocalToWorldTransform(0)
     xf1 = UsdGeom.Xformable(prim1).ComputeLocalToWorldTransform(0)
-    world0 = xf0.ExtractTranslation()
-    world1 = xf1.ExtractTranslation()
-
-    # --- Punkt jointa w połowie między segmentami
-    joint_world = Gf.Vec3d(
-        (world0[0] + world1[0]) * 0.5,
-        (world0[1] + world1[1]) * 0.5,
-        (world0[2] + world1[2]) * 0.5,
-    )
-
+    
+    # --- Znajdź optymalną pozycję jointa na styku segmentów
+    joint_world = get_joint_position_between_segments(prim0, prim1)
+    
+    # --- Sprawdź odległość między segmentami
+    center0 = get_bounding_box_center(prim0)
+    center1 = get_bounding_box_center(prim1)
+    distance = (center1 - center0).GetLength()
+    
+    print(f"Segment {n0} -> {n1}: odległość = {distance:.3f}")
+    
     # --- Create joint
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
     omni.kit.commands.execute(
@@ -109,11 +180,9 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    # --- Local positions
-    # Body0 pivot = 0,0,0 (pivot w centrum segmentu)
-    local0 = Gf.Vec3d(0.0, 0.0, 0.0)
-
-    # Body1 offset = world1 → world joint
+    # --- Oblicz lokalne pozycje jointa
+    # Transformuj pozycję jointa w świecie do lokalnej przestrzeni każdego segmentu
+    local0 = xf0.GetInverse().Transform(joint_world)
     local1 = xf1.GetInverse().Transform(joint_world)
 
     # --- Podłącz body
@@ -121,13 +190,22 @@ for i in range(len(SEQUENCE)):
     joint.CreateBody1Rel().SetTargets([path1])
 
     # --- Ustaw lokalne pozycje
-    joint.CreateLocalPos0Attr(local0)
-    joint.CreateLocalPos1Attr(local1)
+    joint.CreateLocalPos0Attr().Set(local0)
+    joint.CreateLocalPos1Attr().Set(local1)
 
-    # --- Parametry jointa
-    joint.CreateAxisAttr("X")
-    joint.CreateLowerLimitAttr(-30.0)
-    joint.CreateUpperLimitAttr(30.0)
+    # --- Ustaw orientację jointa (ważne dla revolute joint)
+    # Zakładamy, że joint ma obracać się wokół osi X
+    joint.CreateAxisAttr().Set("X")
+    
+    # --- Ustaw ograniczenia (dopasuj do swoich potrzeb)
+    joint.CreateLowerLimitAttr().Set(-30.0)
+    joint.CreateUpperLimitAttr().Set(30.0)
+    
+    # --- Ustaw sztywność i tłumienie (aby track był stabilny)
+    if hasattr(joint, 'CreateStiffnessAttr'):
+        joint.CreateStiffnessAttr().Set(1000000.0)  # Wysoka sztywność
+    if hasattr(joint, 'CreateDampingAttr'):
+        joint.CreateDampingAttr().Set(1000.0)  # Tłumienie
 
     created += 1
     if created % 20 == 0:
@@ -137,3 +215,24 @@ print("\n✅ ZAKOŃCZONO")
 print(f"✔️ Utworzono: {created}")
 print(f"⚠️ Pominięto: {skipped}")
 
+# ===================== DODATKOWE USTAWIENIA =====================
+print("\n🔧 Ustawiam dodatkowe właściwości fizyczne...")
+
+# Upewnij się, że wszystkie segmenty mają rigid body
+for n in SEQUENCE:
+    path = f"{TRACK_ROOT}/{PREFIX}{n}"
+    prim = stage.GetPrimAtPath(path)
+    if prim.IsValid():
+        # Znajdź mesh pod tym primem
+        mesh = find_mesh_prim(path)
+        if mesh:
+            ensure_rigid_body(mesh)
+            
+            # Ustaw masę (dopasuj do potrzeb)
+            mass_api = UsdPhysics.MassAPI.Apply(mesh)
+            mass_api.CreateMassAttr().Set(10.0)  # Masa 10kg
+            
+            # Ustaw moment bezwładności (ważne dla stabilności)
+            mass_api.CreateDiagonalInertiaAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+
+print("✅ Gotowe! Uruchom symulację.")
