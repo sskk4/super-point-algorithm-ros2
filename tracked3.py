@@ -5,7 +5,6 @@ import omni.kit.commands
 stage = omni.usd.get_context().get_stage()
 
 TRACK_ROOT = "/World/g1/g1"
-JOINT_ROOT = f"{TRACK_ROOT}/Joints"
 PREFIX = "DEFAULT_"
 
 SEQUENCE = [
@@ -19,37 +18,7 @@ SEQUENCE = [
     118, 2
 ]
 
-# ===================== KONFIGURACJA GĄSIENICY =====================
-# Dostosuj te wartości do swojego modelu:
-
-JOINT_AXIS = "Y"  # Oś obrotu: "X", "Y" lub "Z"
-                  # Y = pionowa, Z = głębokość, X = szerokość
-
-ANGLE_LIMITS = 25.0  # Maksymalny kąt zgięcia (stopnie)
-                     # Zwiększ dla bardziej elastycznej gąsienicy
-
-TRACK_MASS = 0.3     # Masa pojedynczego ogniwa (kg)
-
-JOINT_STIFFNESS = 100.0   # Sztywność połączenia (N⋅m/rad)
-                          # Wyższa = sztywniejsza gąsienica
-
-JOINT_DAMPING = 10.0      # Tłumienie (N⋅m⋅s/rad)
-                          # Wyższa = mniej drgań
-
-# ===================================================================
-
-def ensure_path_exists(path):
-    parts = path.strip("/").split("/")
-    current = ""
-    for part in parts:
-        current += f"/{part}"
-        prim = stage.GetPrimAtPath(current)
-        if not prim.IsValid():
-            omni.kit.commands.execute(
-                "CreatePrim",
-                prim_path=current,
-                prim_type="Xform"
-            )
+# ===================== FUNKCJE =====================
 
 def find_mesh_in_xform(xform_path):
     prim = stage.GetPrimAtPath(xform_path)
@@ -59,23 +28,131 @@ def find_mesh_in_xform(xform_path):
     for child in prim.GetAllChildren():
         if child.GetTypeName() in ("Mesh", "Cube", "Sphere", "Capsule", "Cylinder"):
             return child
-    
     return None
+
+def get_mesh_bbox_center(mesh_prim):
+    """
+    Oblicza środek bounding box mesha w world space
+    """
+    mesh = UsdGeom.Mesh(mesh_prim)
+    points_attr = mesh.GetPointsAttr()
+    
+    if not points_attr:
+        return None
+    
+    points = points_attr.Get()
+    if not points or len(points) == 0:
+        return None
+    
+    # Oblicz AABB (axis-aligned bounding box)
+    min_point = Gf.Vec3f(float('inf'), float('inf'), float('inf'))
+    max_point = Gf.Vec3f(float('-inf'), float('-inf'), float('-inf'))
+    
+    for pt in points:
+        min_point[0] = min(min_point[0], pt[0])
+        min_point[1] = min(min_point[1], pt[1])
+        min_point[2] = min(min_point[2], pt[2])
+        max_point[0] = max(max_point[0], pt[0])
+        max_point[1] = max(max_point[1], pt[1])
+        max_point[2] = max(max_point[2], pt[2])
+    
+    # Środek bbox w LOCAL space mesha
+    local_center = Gf.Vec3d(
+        (min_point[0] + max_point[0]) * 0.5,
+        (min_point[1] + max_point[1]) * 0.5,
+        (min_point[2] + max_point[2]) * 0.5
+    )
+    
+    # Przekształć do world space
+    mesh_xformable = UsdGeom.Xformable(mesh_prim)
+    mesh_world_xform = mesh_xformable.ComputeLocalToWorldTransform(0)
+    world_center = mesh_world_xform.Transform(local_center)
+    
+    return world_center
+
+def fix_pivot_for_element(xform_path):
+    """
+    GŁÓWNA FUNKCJA: Naprawia pivot dla pojedynczego elementu gąsienicy
+    
+    Struktura:
+    DEFAULT_68 (Xform) <- tutaj ustawiamy nowy pivot
+      └─ mesh (Mesh)   <- tego geometria zostaje w miejscu
+    """
+    xform_prim = stage.GetPrimAtPath(xform_path)
+    if not xform_prim.IsValid():
+        return False
+    
+    mesh_prim = find_mesh_in_xform(xform_path)
+    if not mesh_prim:
+        return False
+    
+    # 1. Pobierz środek geometrii w world space
+    bbox_center = get_mesh_bbox_center(mesh_prim)
+    if bbox_center is None:
+        return False
+    
+    # 2. Obecna transformacja Xform
+    xform = UsdGeom.Xformable(xform_prim)
+    current_xform_matrix = xform.ComputeLocalToWorldTransform(0)
+    current_position = current_xform_matrix.ExtractTranslation()
+    
+    # 3. Offset który musimy dodać do Xform
+    offset = bbox_center - current_position
+    
+    # 4. Przesuń Xform do środka geometrii
+    new_position = bbox_center
+    
+    # 5. Oblicz przeciwny offset dla mesha (żeby został w miejscu)
+    mesh_xform = UsdGeom.Xformable(mesh_prim)
+    
+    # Ustaw nową pozycję dla Xform
+    xform.ClearXformOpOrder()
+    translate_op = xform.AddTranslateOp()
+    translate_op.Set(new_position)
+    
+    # Kompensuj przesunięcie w meshu (żeby geometria nie uciekła)
+    mesh_xform.ClearXformOpOrder()
+    mesh_translate_op = mesh_xform.AddTranslateOp()
+    mesh_translate_op.Set(-offset)  # Przeciwny offset
+    
+    return True
+
+# ===================== KROK 1: NAPRAWA PIVOTÓW =====================
+
+print("🔧 NAPRAWA PIVOTÓW GĄSIENICY")
+print("="*60)
+
+fixed = 0
+failed = 0
+
+for idx in SEQUENCE:
+    xform_path = f"{TRACK_ROOT}/{PREFIX}{idx}"
+    
+    if fix_pivot_for_element(xform_path):
+        fixed += 1
+        if fixed % 20 == 0:
+            print(f"⏳ Naprawiono {fixed}/{len(SEQUENCE)} elementów...")
+    else:
+        print(f"⚠️ Nie udało się naprawić {PREFIX}{idx}")
+        failed += 1
+
+print("\n✅ PIVOTY NAPRAWIONE")
+print(f"✔️ Naprawiono: {fixed}")
+print(f"❌ Błędów: {failed}")
+
+# ===================== KROK 2: PHYSICS =====================
 
 def setup_physics_on_mesh(mesh_prim):
     if mesh_prim is None:
         return
     
-    # RigidBody
     if not mesh_prim.HasAPI(UsdPhysics.RigidBodyAPI):
         rb = UsdPhysics.RigidBodyAPI.Apply(mesh_prim)
         rb.CreateRigidBodyEnabledAttr(True)
     
-    # Collision
     if not mesh_prim.HasAPI(UsdPhysics.CollisionAPI):
         UsdPhysics.CollisionAPI.Apply(mesh_prim)
     
-    # Convex Hull collision
     if not mesh_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
         mesh_collision = UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
         mesh_collision.CreateApproximationAttr("convexHull")
@@ -83,60 +160,11 @@ def setup_physics_on_mesh(mesh_prim):
         mesh_collision = UsdPhysics.MeshCollisionAPI(mesh_prim)
         mesh_collision.GetApproximationAttr().Set("convexHull")
     
-    # Masa
     mass_api = UsdPhysics.MassAPI.Apply(mesh_prim)
-    mass_api.CreateMassAttr(TRACK_MASS)
+    mass_api.CreateMassAttr(0.3)
 
-def get_local_pos_for_joint(body_prim, joint_world_pos):
-    """
-    KLUCZOWA FUNKCJA: Oblicza LOCAL position względem PARENT Xform
-    USD Physics wymaga pozycji względem rodzica body, nie samego body!
-    """
-    # Pobierz parent (Xform)
-    parent = body_prim.GetParent()
-    
-    if parent and parent.IsValid():
-        # Transformacja parent -> world
-        parent_xformable = UsdGeom.Xformable(parent)
-        parent_world_xform = parent_xformable.ComputeLocalToWorldTransform(0)
-        
-        # World -> parent local
-        inv_parent_xform = parent_world_xform.GetInverse()
-        local_pos = inv_parent_xform.Transform(joint_world_pos)
-        
-        return local_pos
-    else:
-        # Fallback: jeśli nie ma parent, użyj samego body
-        body_xformable = UsdGeom.Xformable(body_prim)
-        body_world_xform = body_xformable.ComputeLocalToWorldTransform(0)
-        inv_body_xform = body_world_xform.GetInverse()
-        return inv_body_xform.Transform(joint_world_pos)
+print("\n🔧 KONFIGURACJA PHYSICS...")
 
-def get_world_position(prim):
-    """Pobiera pozycję w world space"""
-    xformable = UsdGeom.Xformable(prim)
-    world_xform = xformable.ComputeLocalToWorldTransform(0)
-    return world_xform.ExtractTranslation()
-
-def get_contact_point(pos0, pos1):
-    """
-    Oblicza punkt styku między dwoma ogniwami gąsienicy
-    Zamiast środka, używa punktu bliżej krawędzi
-    """
-    # Wektor między elementami
-    vec = pos1 - pos0
-    distance = vec.GetLength()
-    
-    # Punkt styku: 40% drogi od pos0 do pos1
-    # (dostosuj % jeśli elementy nachodzą na siebie)
-    contact_point = pos0 + vec * 0.4
-    
-    return contact_point
-
-# ===================== KROK 1: PHYSICS =====================
-ensure_path_exists(JOINT_ROOT)
-
-print("🔧 KROK 1: Konfiguracja physics...")
 configured = 0
 for idx in SEQUENCE:
     xform_path = f"{TRACK_ROOT}/{PREFIX}{idx}"
@@ -145,10 +173,27 @@ for idx in SEQUENCE:
         setup_physics_on_mesh(mesh)
         configured += 1
 
-print(f"✅ Skonfigurowano {configured} elementów\n")
+print(f"✅ Skonfigurowano physics: {configured}")
 
-# ===================== KROK 2: JOINTY =====================
-print("🔗 KROK 2: Tworzenie jointów...")
+# ===================== KROK 3: JOINTY =====================
+
+JOINT_ROOT = f"{TRACK_ROOT}/Joints"
+JOINT_AXIS = "Y"  # Dostosuj: X, Y lub Z
+ANGLE_LIMITS = 20.0
+
+def ensure_path_exists(path):
+    parts = path.strip("/").split("/")
+    current = ""
+    for part in parts:
+        current += f"/{part}"
+        prim = stage.GetPrimAtPath(current)
+        if not prim.IsValid():
+            omni.kit.commands.execute("CreatePrim", prim_path=current, prim_type="Xform")
+
+ensure_path_exists(JOINT_ROOT)
+
+print("\n🔗 TWORZENIE JOINTÓW...")
+
 created = 0
 skipped = 0
 
@@ -166,25 +211,22 @@ for i in range(len(SEQUENCE)):
         skipped += 1
         continue
     
-    # === POZYCJE W WORLD SPACE ===
-    world_pos0 = get_world_position(mesh0)
-    world_pos1 = get_world_position(mesh1)
+    # Teraz pozycje Xform = środki geometrii!
+    xform0 = UsdGeom.Xformable(stage.GetPrimAtPath(xform0_path))
+    xform1 = UsdGeom.Xformable(stage.GetPrimAtPath(xform1_path))
     
-    # Punkt styku (nie środek!)
-    joint_world_pos = get_contact_point(world_pos0, world_pos1)
+    pos0 = xform0.ComputeLocalToWorldTransform(0).ExtractTranslation()
+    pos1 = xform1.ComputeLocalToWorldTransform(0).ExtractTranslation()
     
-    # === KONWERSJA DO LOCAL SPACE (względem PARENT!) ===
-    local_pos0 = get_local_pos_for_joint(mesh0, joint_world_pos)
-    local_pos1 = get_local_pos_for_joint(mesh1, joint_world_pos)
+    # Punkt połączenia: punkt styku między elementami
+    vec = pos1 - pos0
+    joint_world_pos = pos0 + vec * 0.5  # środek między pivotami
     
-    # Debug co 10 jointów
-    if created % 10 == 0:
-        print(f"\n  Joint {n0}→{n1}:")
-        print(f"    World pos: {joint_world_pos}")
-        print(f"    Local0: {local_pos0}")
-        print(f"    Local1: {local_pos1}")
+    # Pozycje lokalne (teraz proste, bo pivoty są poprawne!)
+    local_pos0 = Gf.Vec3d(vec[0] * 0.5, vec[1] * 0.5, vec[2] * 0.5)
+    local_pos1 = Gf.Vec3d(-vec[0] * 0.5, -vec[1] * 0.5, -vec[2] * 0.5)
     
-    # === TWORZENIE JOINTA ===
+    # Tworzenie jointa
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
     
     old_joint = stage.GetPrimAtPath(joint_path)
@@ -200,47 +242,32 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
     
-    # === RELACJE ===
     joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
     joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
     
-    # === POZYCJE LOKALNE ===
     joint.CreateLocalPos0Attr().Set(local_pos0)
     joint.CreateLocalPos1Attr().Set(local_pos1)
     
-    # === OŚ I LIMITY ===
     joint.CreateAxisAttr(JOINT_AXIS)
     joint.CreateLowerLimitAttr(-ANGLE_LIMITS)
     joint.CreateUpperLimitAttr(ANGLE_LIMITS)
     
-    # === PHYSX PARAMETRY ===
+    # PhysX parameters
     if not joint_prim.HasAPI(PhysxSchema.PhysxJointAPI):
         physx_joint = PhysxSchema.PhysxJointAPI.Apply(joint_prim)
     else:
         physx_joint = PhysxSchema.PhysxJointAPI(joint_prim)
     
-    # Drive dla sztywności
-    drive = PhysxSchema.PhysxJointAPI(joint_prim)
-    drive.CreateJointFrictionAttr(1.0)
-    
-    # Angular drive (opcjonalne - symuluje sprężynę)
-    joint.CreateDriveTypeAttr("force")  # lub "acceleration"
-    joint.CreateDriveTargetAttr(0.0)    # Pozycja neutralna
-    joint.CreateDriveStiffnessAttr(JOINT_STIFFNESS)
-    joint.CreateDriveDampingAttr(JOINT_DAMPING)
+    physx_joint.CreateJointFrictionAttr(0.5)
     
     created += 1
-
-print(f"\n✅ ZAKOŃCZONO")
-print(f"✔️ Utworzono: {created}")
-print(f"⚠️ Pominięto: {skipped}")
+    if created % 20 == 0:
+        print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
 
 print("\n" + "="*60)
-print("⚙️  PARAMETRY GĄSIENICY (dostosuj na górze skryptu):")
+print("✅ ZAKOŃCZONO")
 print("="*60)
-print(f"  Oś jointa:        {JOINT_AXIS}")
-print(f"  Limity kątowe:    ±{ANGLE_LIMITS}°")
-print(f"  Masa ogniwa:      {TRACK_MASS} kg")
-print(f"  Sztywność:        {JOINT_STIFFNESS} N⋅m/rad")
-print(f"  Tłumienie:        {JOINT_DAMPING} N⋅m⋅s/rad")
+print(f"✔️ Pivoty naprawione: {fixed}")
+print(f"✔️ Jointy utworzone: {created}")
+print(f"⚠️ Pominięto: {skipped}")
 print("="*60)
