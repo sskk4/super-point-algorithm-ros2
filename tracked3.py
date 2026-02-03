@@ -19,7 +19,25 @@ SEQUENCE = [
     118, 2
 ]
 
-# ===================== FUNKCJE =====================
+# ===================== KONFIGURACJA GĄSIENICY =====================
+# Dostosuj te wartości do swojego modelu:
+
+JOINT_AXIS = "Y"  # Oś obrotu: "X", "Y" lub "Z"
+                  # Y = pionowa, Z = głębokość, X = szerokość
+
+ANGLE_LIMITS = 25.0  # Maksymalny kąt zgięcia (stopnie)
+                     # Zwiększ dla bardziej elastycznej gąsienicy
+
+TRACK_MASS = 0.3     # Masa pojedynczego ogniwa (kg)
+
+JOINT_STIFFNESS = 100.0   # Sztywność połączenia (N⋅m/rad)
+                          # Wyższa = sztywniejsza gąsienica
+
+JOINT_DAMPING = 10.0      # Tłumienie (N⋅m⋅s/rad)
+                          # Wyższa = mniej drgań
+
+# ===================================================================
+
 def ensure_path_exists(path):
     parts = path.strip("/").split("/")
     current = ""
@@ -45,49 +63,80 @@ def find_mesh_in_xform(xform_path):
     return None
 
 def setup_physics_on_mesh(mesh_prim):
-    """
-    Konfiguruje physics z CONVEX HULL zamiast triangle mesh
-    """
     if mesh_prim is None:
         return
     
-    # RigidBody API
+    # RigidBody
     if not mesh_prim.HasAPI(UsdPhysics.RigidBodyAPI):
         rb = UsdPhysics.RigidBodyAPI.Apply(mesh_prim)
         rb.CreateRigidBodyEnabledAttr(True)
     
-    # Collision API
+    # Collision
     if not mesh_prim.HasAPI(UsdPhysics.CollisionAPI):
         UsdPhysics.CollisionAPI.Apply(mesh_prim)
     
-    # KLUCZOWA ZMIANA: CONVEX HULL zamiast triangle mesh
+    # Convex Hull collision
     if not mesh_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
         mesh_collision = UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
-        # "convexHull" zamiast domyślnego "meshSimplification"
         mesh_collision.CreateApproximationAttr("convexHull")
     else:
         mesh_collision = UsdPhysics.MeshCollisionAPI(mesh_prim)
         mesh_collision.GetApproximationAttr().Set("convexHull")
     
-    # Masa i inne parametry
+    # Masa
     mass_api = UsdPhysics.MassAPI.Apply(mesh_prim)
-    mass_api.CreateMassAttr(0.5)  # 0.5 kg na element gąsienicy
+    mass_api.CreateMassAttr(TRACK_MASS)
 
-def get_world_transform(prim):
+def get_local_pos_for_joint(body_prim, joint_world_pos):
+    """
+    KLUCZOWA FUNKCJA: Oblicza LOCAL position względem PARENT Xform
+    USD Physics wymaga pozycji względem rodzica body, nie samego body!
+    """
+    # Pobierz parent (Xform)
+    parent = body_prim.GetParent()
+    
+    if parent and parent.IsValid():
+        # Transformacja parent -> world
+        parent_xformable = UsdGeom.Xformable(parent)
+        parent_world_xform = parent_xformable.ComputeLocalToWorldTransform(0)
+        
+        # World -> parent local
+        inv_parent_xform = parent_world_xform.GetInverse()
+        local_pos = inv_parent_xform.Transform(joint_world_pos)
+        
+        return local_pos
+    else:
+        # Fallback: jeśli nie ma parent, użyj samego body
+        body_xformable = UsdGeom.Xformable(body_prim)
+        body_world_xform = body_xformable.ComputeLocalToWorldTransform(0)
+        inv_body_xform = body_world_xform.GetInverse()
+        return inv_body_xform.Transform(joint_world_pos)
+
+def get_world_position(prim):
+    """Pobiera pozycję w world space"""
     xformable = UsdGeom.Xformable(prim)
-    return xformable.ComputeLocalToWorldTransform(0)
+    world_xform = xformable.ComputeLocalToWorldTransform(0)
+    return world_xform.ExtractTranslation()
 
-def get_midpoint(p1, p2):
-    return Gf.Vec3d(
-        (p1[0] + p2[0]) * 0.5,
-        (p1[1] + p2[1]) * 0.5,
-        (p1[2] + p2[2]) * 0.5,
-    )
+def get_contact_point(pos0, pos1):
+    """
+    Oblicza punkt styku między dwoma ogniwami gąsienicy
+    Zamiast środka, używa punktu bliżej krawędzi
+    """
+    # Wektor między elementami
+    vec = pos1 - pos0
+    distance = vec.GetLength()
+    
+    # Punkt styku: 40% drogi od pos0 do pos1
+    # (dostosuj % jeśli elementy nachodzą na siebie)
+    contact_point = pos0 + vec * 0.4
+    
+    return contact_point
 
-# ===================== START =====================
+# ===================== KROK 1: PHYSICS =====================
 ensure_path_exists(JOINT_ROOT)
 
-print("🔧 KROK 1: Konfiguracja physics na wszystkich elementach...")
+print("🔧 KROK 1: Konfiguracja physics...")
 configured = 0
 for idx in SEQUENCE:
     xform_path = f"{TRACK_ROOT}/{PREFIX}{idx}"
@@ -96,8 +145,9 @@ for idx in SEQUENCE:
         setup_physics_on_mesh(mesh)
         configured += 1
 
-print(f"✅ Skonfigurowano {configured} elementów z convex hull\n")
+print(f"✅ Skonfigurowano {configured} elementów\n")
 
+# ===================== KROK 2: JOINTY =====================
 print("🔗 KROK 2: Tworzenie jointów...")
 created = 0
 skipped = 0
@@ -113,30 +163,30 @@ for i in range(len(SEQUENCE)):
     mesh1 = find_mesh_in_xform(xform1_path)
     
     if mesh0 is None or mesh1 is None:
-        print(f"⚠️ Pomijam {PREFIX}{n0} ↔ {PREFIX}{n1}")
         skipped += 1
         continue
     
-    # === WORLD TRANSFORMS ===
-    xf0 = get_world_transform(mesh0)
-    xf1 = get_world_transform(mesh1)
+    # === POZYCJE W WORLD SPACE ===
+    world_pos0 = get_world_position(mesh0)
+    world_pos1 = get_world_position(mesh1)
     
-    world_pos0 = xf0.ExtractTranslation()
-    world_pos1 = xf1.ExtractTranslation()
+    # Punkt styku (nie środek!)
+    joint_world_pos = get_contact_point(world_pos0, world_pos1)
     
-    joint_world_pos = get_midpoint(world_pos0, world_pos1)
+    # === KONWERSJA DO LOCAL SPACE (względem PARENT!) ===
+    local_pos0 = get_local_pos_for_joint(mesh0, joint_world_pos)
+    local_pos1 = get_local_pos_for_joint(mesh1, joint_world_pos)
     
-    # === KONWERSJA DO LOCAL SPACE ===
-    inv_xf0 = xf0.GetInverse()
-    inv_xf1 = xf1.GetInverse()
-    
-    local_pos0 = inv_xf0.Transform(joint_world_pos)
-    local_pos1 = inv_xf1.Transform(joint_world_pos)
+    # Debug co 10 jointów
+    if created % 10 == 0:
+        print(f"\n  Joint {n0}→{n1}:")
+        print(f"    World pos: {joint_world_pos}")
+        print(f"    Local0: {local_pos0}")
+        print(f"    Local1: {local_pos1}")
     
     # === TWORZENIE JOINTA ===
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
     
-    # Usuń stary joint jeśli istnieje
     old_joint = stage.GetPrimAtPath(joint_path)
     if old_joint.IsValid():
         stage.RemovePrim(joint_path)
@@ -150,7 +200,7 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
     
-    # === RELACJE BODY ===
+    # === RELACJE ===
     joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
     joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
     
@@ -158,32 +208,39 @@ for i in range(len(SEQUENCE)):
     joint.CreateLocalPos0Attr().Set(local_pos0)
     joint.CreateLocalPos1Attr().Set(local_pos1)
     
-    # === OŚ OBROTU ===
-    # Dla gąsienicy zwykle Y (pionowa) lub Z (głębokość)
-    joint.CreateAxisAttr("Y")  # Zmień na "Z" jeśli oś jest inna
+    # === OŚ I LIMITY ===
+    joint.CreateAxisAttr(JOINT_AXIS)
+    joint.CreateLowerLimitAttr(-ANGLE_LIMITS)
+    joint.CreateUpperLimitAttr(ANGLE_LIMITS)
     
-    # === LIMITY KĄTOWE ===
-    joint.CreateLowerLimitAttr(-15.0)  # Mniejszy zakres dla stabilności
-    joint.CreateUpperLimitAttr(15.0)
-    
-    # === OPCJONALNIE: Damping i stiffness ===
-    # Zapobiega chaotycznym ruchom
-    if joint_prim.HasAPI(PhysxSchema.PhysxJointAPI):
-        physx_joint = PhysxSchema.PhysxJointAPI(joint_prim)
-    else:
+    # === PHYSX PARAMETRY ===
+    if not joint_prim.HasAPI(PhysxSchema.PhysxJointAPI):
         physx_joint = PhysxSchema.PhysxJointAPI.Apply(joint_prim)
+    else:
+        physx_joint = PhysxSchema.PhysxJointAPI(joint_prim)
     
-    # Tłumienie kątowe
-    physx_joint.CreateJointFrictionAttr(0.1)
+    # Drive dla sztywności
+    drive = PhysxSchema.PhysxJointAPI(joint_prim)
+    drive.CreateJointFrictionAttr(1.0)
+    
+    # Angular drive (opcjonalne - symuluje sprężynę)
+    joint.CreateDriveTypeAttr("force")  # lub "acceleration"
+    joint.CreateDriveTargetAttr(0.0)    # Pozycja neutralna
+    joint.CreateDriveStiffnessAttr(JOINT_STIFFNESS)
+    joint.CreateDriveDampingAttr(JOINT_DAMPING)
     
     created += 1
-    if created % 20 == 0:
-        print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
 
-print("\n✅ ZAKOŃCZONO")
-print(f"✔️ Utworzono jointów: {created}")
+print(f"\n✅ ZAKOŃCZONO")
+print(f"✔️ Utworzono: {created}")
 print(f"⚠️ Pominięto: {skipped}")
-print("\n💡 WSKAZÓWKI:")
-print("   - Jeśli elementy nadal latają, sprawdź oś jointa (Y/Z/X)")
-print("   - Możesz zmniejszyć limity kątowe (-5° do 5°)")
-print("   - Upewnij się że masa pojazdu > suma mas gąsienicy")
+
+print("\n" + "="*60)
+print("⚙️  PARAMETRY GĄSIENICY (dostosuj na górze skryptu):")
+print("="*60)
+print(f"  Oś jointa:        {JOINT_AXIS}")
+print(f"  Limity kątowe:    ±{ANGLE_LIMITS}°")
+print(f"  Masa ogniwa:      {TRACK_MASS} kg")
+print(f"  Sztywność:        {JOINT_STIFFNESS} N⋅m/rad")
+print(f"  Tłumienie:        {JOINT_DAMPING} N⋅m⋅s/rad")
+print("="*60)
