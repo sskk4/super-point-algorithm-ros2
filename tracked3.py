@@ -2,8 +2,6 @@ from pxr import UsdPhysics, UsdGeom, Gf
 import omni.usd
 import omni.kit.commands
 
-# ===================== KONFIGURACJA =====================
-
 stage = omni.usd.get_context().get_stage()
 
 TRACK_ROOT = "/World/Robot/Track"
@@ -35,30 +33,35 @@ def ensure_path_exists(path):
                 prim_type="Xform"
             )
 
-def get_world_position(prim_path):
-    prim = stage.GetPrimAtPath(prim_path)
+def find_mesh_prim(xform_path):
+    """Znajduje pierwszy Mesh pod danym Xform"""
+    prim = stage.GetPrimAtPath(xform_path)
     if not prim.IsValid():
         return None
+    for child in prim.GetAllChildren():
+        if child.GetTypeName() in ("Mesh", "Cube", "Sphere", "Capsule", "Cylinder"):
+            return child
+    return None  # jeśli nie ma mesh, zwraca None
 
+def ensure_rigid_body(prim):
+    if prim is None:
+        return
+    if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        UsdPhysics.RigidBodyAPI.Apply(prim)
+    if not prim.HasAPI(UsdPhysics.CollisionAPI):
+        UsdPhysics.CollisionAPI.Apply(prim)
+
+def get_world_position(prim):
     xformable = UsdGeom.Xformable(prim)
-    world_transform = xformable.ComputeLocalToWorldTransform(0)
-    return world_transform.ExtractTranslation()
+    xf = xformable.ComputeLocalToWorldTransform(0)
+    return xf.ExtractTranslation(), xf
 
 def get_midpoint(p1, p2):
     return Gf.Vec3d(
         (p1[0] + p2[0]) * 0.5,
         (p1[1] + p2[1]) * 0.5,
-        (p1[2] + p2[2]) * 0.5
+        (p1[2] + p2[2]) * 0.5,
     )
-
-def world_to_local(prim_path, world_pos):
-    prim = stage.GetPrimAtPath(prim_path)
-    xformable = UsdGeom.Xformable(prim)
-
-    world_tf = xformable.ComputeLocalToWorldTransform(0)
-    inv_tf = world_tf.GetInverse()
-
-    return inv_tf.Transform(world_pos)
 
 # ===================== START =====================
 
@@ -71,44 +74,29 @@ for i in range(len(SEQUENCE)):
     n0 = SEQUENCE[i]
     n1 = SEQUENCE[(i + 1) % len(SEQUENCE)]
 
-    body0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
-    body1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
+    xform0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
+    xform1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
 
-    prim0 = stage.GetPrimAtPath(body0_path)
-    prim1 = stage.GetPrimAtPath(body1_path)
+    mesh0 = find_mesh_prim(xform0_path)
+    mesh1 = find_mesh_prim(xform1_path)
 
-    if not prim0.IsValid() or not prim1.IsValid():
+    if mesh0 is None or mesh1 is None:
+        print(f"⚠️ Pomijam {PREFIX}{n0} lub {PREFIX}{n1} – brak mesh")
         skipped += 1
         continue
 
     # === WYMUSZ RIGID BODY + COLLISION ===
-    if not prim0.HasAPI(UsdPhysics.RigidBodyAPI):
-        UsdPhysics.RigidBodyAPI.Apply(prim0)
-    if not prim0.HasAPI(UsdPhysics.CollisionAPI):
-        UsdPhysics.CollisionAPI.Apply(prim0)
+    ensure_rigid_body(mesh0)
+    ensure_rigid_body(mesh1)
 
-    if not prim1.HasAPI(UsdPhysics.RigidBodyAPI):
-        UsdPhysics.RigidBodyAPI.Apply(prim1)
-    if not prim1.HasAPI(UsdPhysics.CollisionAPI):
-        UsdPhysics.CollisionAPI.Apply(prim1)
+    # === WORLD POSITIONS ===
+    world_pos0, xf0 = get_world_position(mesh0)
+    world_pos1, xf1 = get_world_position(mesh1)
 
-    # === WORLD TRANSFORM ===
-    xf0 = UsdGeom.Xformable(prim0).ComputeLocalToWorldTransform(0)
-    xf1 = UsdGeom.Xformable(prim1).ComputeLocalToWorldTransform(0)
-
-    world_pos0 = xf0.ExtractTranslation()
-    world_pos1 = xf1.ExtractTranslation()
-
-    # === PUNKT JOINTA (WORLD) ===
-    joint_world_pos = Gf.Vec3d(
-        (world_pos0[0] + world_pos1[0]) * 0.5,
-        (world_pos0[1] + world_pos1[1]) * 0.5,
-        (world_pos0[2] + world_pos1[2]) * 0.5,
-    )
+    joint_world_pos = get_midpoint(world_pos0, world_pos1)
 
     # === CREATE JOINT ===
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
-
     omni.kit.commands.execute(
         "CreatePrim",
         prim_path=joint_path,
@@ -123,8 +111,8 @@ for i in range(len(SEQUENCE)):
     local1 = xf1.GetInverse().Transform(joint_world_pos)
 
     # === BODY RELATIONS ===
-    joint.CreateBody0Rel().SetTargets([body0_path])
-    joint.CreateBody1Rel().SetTargets([body1_path])
+    joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
+    joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
 
     # === LOCAL POSITIONS ===
     joint.CreateLocalPos0Attr(local0)
@@ -136,11 +124,9 @@ for i in range(len(SEQUENCE)):
     joint.CreateUpperLimitAttr(30.0)
 
     created += 1
-
     if created % 20 == 0:
-        print(f"⏳ {created}/{len(SEQUENCE)} jointów")
+        print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
 
 print("\n✅ ZAKOŃCZONO")
 print(f"✔️ Utworzono: {created}")
 print(f"⚠️ Pominięto: {skipped}")
-
