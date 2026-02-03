@@ -74,27 +74,40 @@ for i in range(len(SEQUENCE)):
     body0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
     body1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
 
-    if not stage.GetPrimAtPath(body0_path).IsValid():
-        print(f"⚠️ Brak: {PREFIX}{n0}")
+    prim0 = stage.GetPrimAtPath(body0_path)
+    prim1 = stage.GetPrimAtPath(body1_path)
+
+    if not prim0.IsValid() or not prim1.IsValid():
         skipped += 1
         continue
 
-    if not stage.GetPrimAtPath(body1_path).IsValid():
-        print(f"⚠️ Brak: {PREFIX}{n1}")
-        skipped += 1
-        continue
+    # === WYMUSZ RIGID BODY + COLLISION ===
+    if not UsdPhysics.RigidBodyAPI(prim0).IsValid():
+        UsdPhysics.RigidBodyAPI.Apply(prim0)
+    if not UsdPhysics.CollisionAPI(prim0).IsValid():
+        UsdPhysics.CollisionAPI.Apply(prim0)
 
-    pos0 = get_world_position(body0_path)
-    pos1 = get_world_position(body1_path)
+    if not UsdPhysics.RigidBodyAPI(prim1).IsValid():
+        UsdPhysics.RigidBodyAPI.Apply(prim1)
+    if not UsdPhysics.CollisionAPI(prim1).IsValid():
+        UsdPhysics.CollisionAPI.Apply(prim1)
 
-    if pos0 is None or pos1 is None:
-        skipped += 1
-        continue
+    # === WORLD POS SEGMENTÓW ===
+    xf0 = UsdGeom.Xformable(prim0).ComputeLocalToWorldTransform(0)
+    xf1 = UsdGeom.Xformable(prim1).ComputeLocalToWorldTransform(0)
 
-    joint_world_pos = get_midpoint(pos0, pos1)
+    world_pos0 = xf0.ExtractTranslation()
+    world_pos1 = xf1.ExtractTranslation()
 
-    joint_name = f"joint_{n0}_to_{n1}"
-    joint_path = f"{JOINT_ROOT}/{joint_name}"
+    # === PUNKT JOINTA (WORLD) ===
+    joint_world_pos = Gf.Vec3d(
+        (world_pos0[0] + world_pos1[0]) * 0.5,
+        (world_pos0[1] + world_pos1[1]) * 0.5,
+        (world_pos0[2] + world_pos1[2]) * 0.5,
+    )
+
+    # === CREATE JOINT ===
+    joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
 
     omni.kit.commands.execute(
         "CreatePrim",
@@ -105,15 +118,19 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    local0 = world_to_local(body0_path, joint_world_pos)
-    local1 = world_to_local(body1_path, joint_world_pos)
+    # === WORLD -> LOCAL (KLUCZ) ===
+    local0 = xf0.GetInverse().Transform(joint_world_pos)
+    local1 = xf1.GetInverse().Transform(joint_world_pos)
 
+    # === PODPIĘCIE BODIES ===
     joint.CreateBody0Rel().SetTargets([body0_path])
     joint.CreateBody1Rel().SetTargets([body1_path])
 
+    # === LOCAL POSITIONS (NIE BĘDĄ 0,0,0) ===
     joint.CreateLocalPos0Attr(local0)
     joint.CreateLocalPos1Attr(local1)
 
+    # === PARAMETRY JOINTA ===
     joint.CreateAxisAttr("X")
     joint.CreateLowerLimitAttr(-30.0)
     joint.CreateUpperLimitAttr(30.0)
@@ -121,8 +138,9 @@ for i in range(len(SEQUENCE)):
     created += 1
 
     if created % 20 == 0:
-        print(f"⏳ {created}/{len(SEQUENCE)} jointów")
+        print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
 
-print("\n✅ GOTOWE")
-print(f"✔️ Utworzono jointów: {created}")
+print("\n✅ ZAKOŃCZONO")
+print(f"✔️ Utworzono: {created}")
 print(f"⚠️ Pominięto: {skipped}")
+
