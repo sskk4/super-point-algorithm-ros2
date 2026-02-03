@@ -38,32 +38,30 @@ def ensure_xform(path):
 def get_pivot(prim):
     """
     Pobiera wartość xformOp:translate:pivot.
-    Zwraca zawsze Gf.Vec3f, aby uniknąć błędów C++.
     """
-    # Sprawdzamy czy atrybut istnieje bezpośrednio
     attr = prim.GetAttribute("xformOp:translate:pivot")
     if attr.IsValid():
         val = attr.Get()
         if val is not None:
-            # Konwersja na Vec3f dla pewności
             return Gf.Vec3f(val[0], val[1], val[2])
-    
-    # Jeśli brak pivota, zwracamy wektor zerowy
     return Gf.Vec3f(0.0, 0.0, 0.0)
 
 def apply_pivot_to_mesh(xform_prim, pivot_val):
     """
-    Znajduje dziecko typu Mesh i ustawia mu pivot używając AddPivotOp.
+    Znajduje dziecko typu Mesh i ustawia mu pivot używając bezpiecznego AddXformOp.
     """
     for child in xform_prim.GetChildren():
         if child.IsA(UsdGeom.Mesh):
-            # Rzutujemy na Xformable (to pozwala edytować transformacje)
             xformable = UsdGeom.Xformable(child)
             
-            # Dodajemy operację Pivot (lub pobieramy istniejącą)
-            pivot_op = xformable.AddPivotOp()
+            # --- FIX: Zamiast AddPivotOp używamy uniwersalnego AddXformOp ---
+            # Tworzy atrybut "xformOp:translate:pivot"
+            pivot_op = xformable.AddXformOp(
+                UsdGeom.XformOp.TypeTranslate, 
+                UsdGeom.XformOp.PrecisionFloat, 
+                "pivot"
+            )
             
-            # Ustawiamy wartość (musi być Gf.Vec3f/d)
             if pivot_op:
                 pivot_op.Set(pivot_val)
 
@@ -71,14 +69,11 @@ def ensure_rigid_body(xform_prim):
     if not xform_prim.HasAPI(UsdPhysics.RigidBodyAPI):
         UsdPhysics.RigidBodyAPI.Apply(xform_prim)
 
-    # Ustawienie masy
     mass_api = UsdPhysics.MassAPI.Apply(xform_prim)
-    # Sprawdzamy czy atrybut ma wartość, jeśli nie - ustawiamy
     if not mass_api.GetMassAttr().Get():
-        mass_api.CreateMassAttr(1.0) # Zwiększyłem masę dla stabilności gąsienic
+        mass_api.CreateMassAttr(1.0)
 
 def ensure_collision(xform_prim):
-    """Dodaje CollisionAPI do mesha wewnątrz Xforma."""
     for c in xform_prim.GetChildren():
         if c.IsA(UsdGeom.Mesh):
             if not c.HasAPI(UsdPhysics.CollisionAPI):
@@ -95,11 +90,9 @@ skipped = 0
 
 print("Rozpoczynam tworzenie gąsienicy...")
 
-# Iterujemy przez sekwencję
 for i in range(len(SEQUENCE)):
-    # Pobieramy ID obecnego i następnego elementu
     idx_a = SEQUENCE[i]
-    idx_b = SEQUENCE[(i + 1) % len(SEQUENCE)] # Pętla zamknięta
+    idx_b = SEQUENCE[(i + 1) % len(SEQUENCE)]
 
     path_a = f"{TRACK_ROOT}/{PREFIX}{idx_a}"
     path_b = f"{TRACK_ROOT}/{PREFIX}{idx_b}"
@@ -112,27 +105,25 @@ for i in range(len(SEQUENCE)):
         skipped += 1
         continue
 
-    # 1. POBIERZ PIVOT z XFORM (zawsze Gf.Vec3f)
+    # 1. POBIERZ PIVOT
     pivot_a = get_pivot(prim_a)
     pivot_b = get_pivot(prim_b)
 
-    # 2. DODAJ RIGIDBODY (XFORM)
+    # 2. DODAJ RIGIDBODY
     ensure_rigid_body(prim_a)
     ensure_rigid_body(prim_b)
 
-    # 3. DODAJ COLLISION (MESH)
+    # 3. DODAJ COLLISION
     ensure_collision(prim_a)
     ensure_collision(prim_b)
 
-    # 4. USTAW TEN SAM PIVOT DLA MESHA
-    # Naprawiona funkcja - teraz nie wywali błędu C++ signature
+    # 4. USTAW PIVOT DLA MESHA (UŻYWAJĄC NOWEJ METODY)
     apply_pivot_to_mesh(prim_a, pivot_a)
     apply_pivot_to_mesh(prim_b, pivot_b)
 
-    # 5. STWÓRZ REVOLUTE JOINT
+    # 5. STWÓRZ JOINT
     joint_path = f"{JOINT_ROOT}/joint_{idx_a}_to_{idx_b}"
     
-    # Usuwamy stary joint jeśli istnieje
     if stage.GetPrimAtPath(joint_path).IsValid():
         stage.RemovePrim(joint_path)
 
@@ -145,19 +136,15 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    # Relacje Body0 i Body1
+    # Relacje Body
     joint.CreateBody0Rel().SetTargets([prim_a.GetPath()])
     joint.CreateBody1Rel().SetTargets([prim_b.GetPath()])
 
-    # 6. USTAW LOCAL POSITION NA WARTOŚĆ PIVOTA
-    # Ponieważ pivot_a/b są typu Gf.Vec3f, C++ to zaakceptuje
+    # 6. USTAW LOCAL POSITION
     joint.CreateLocalPos0Attr().Set(pivot_a)
     joint.CreateLocalPos1Attr().Set(pivot_b)
 
-    # Domyślna oś (X)
     joint.CreateAxisAttr().Set("X")
-
-    # Wyłącz kolizje między połączonymi ogniwami
     joint.CreateCollisionEnabledAttr(False)
 
     created += 1
