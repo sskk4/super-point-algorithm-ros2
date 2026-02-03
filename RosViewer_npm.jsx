@@ -217,35 +217,52 @@ const RosViewer = () => {
   };
 
   // --- PRZETWARZANIE OBRAZU ---
-  const processImage = (message) => {
-    // (Kod bez zmian - jest poprawny z poprzedniego kroku)
-    try {
-        const width = message.width;
-        const height = message.height;
-        const canvas = canvasRef.current;
-        if(!canvas) return;
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        const imgData = ctx.createImageData(width, height);
-        const data = decodeBase64(message.data);
-        
-        // Prosta obsługa rgb8/bgr8/mono8 (skrót)
-        let ptr = 0;
-        for(let i=0; i < width*height; i++) {
-            const r = message.encoding.includes('bgr') ? data[ptr+2] : data[ptr];
-            const g = message.encoding.includes('mono') ? data[ptr] : data[ptr+1];
-            const b = message.encoding.includes('bgr') ? data[ptr] : (message.encoding.includes('mono') ? data[ptr] : data[ptr+2]);
-            imgData.data[i*4] = r;
-            imgData.data[i*4+1] = g;
-            imgData.data[i*4+2] = b;
-            imgData.data[i*4+3] = 255;
-            ptr += (message.encoding.includes('mono') ? 1 : 3);
-        }
-        ctx.putImageData(imgData, 0, 0);
-        setImageData(canvas.toDataURL());
-    } catch(e) {}
-  };
+const processImage = (message) => {
+  try {
+    const width = message.width;
+    const height = message.height;
+    const encoding = message.encoding;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(width, height);
+
+    const data = decodeBase64(message.data);
+
+    if (encoding === 'rgb8') {
+      for (let i = 0; i < width * height; i++) {
+        imgData.data[i * 4]     = data[i * 3];
+        imgData.data[i * 4 + 1] = data[i * 3 + 1];
+        imgData.data[i * 4 + 2] = data[i * 3 + 2];
+        imgData.data[i * 4 + 3] = 255;
+      }
+    } else if (encoding === 'bgr8') {
+      for (let i = 0; i < width * height; i++) {
+        imgData.data[i * 4]     = data[i * 3 + 2];
+        imgData.data[i * 4 + 1] = data[i * 3 + 1];
+        imgData.data[i * 4 + 2] = data[i * 3];
+        imgData.data[i * 4 + 3] = 255;
+      }
+    } else if (encoding.includes('mono')) {
+      for (let i = 0; i < width * height; i++) {
+        const g = data[i];
+        imgData.data[i * 4] =
+        imgData.data[i * 4 + 1] =
+        imgData.data[i * 4 + 2] = g;
+        imgData.data[i * 4 + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+    setImageData(canvas.toDataURL());
+  } catch (e) {
+    console.error(e);
+  }
+};
 
   // --- ROS CONNECTION ---
   const connect = () => {
