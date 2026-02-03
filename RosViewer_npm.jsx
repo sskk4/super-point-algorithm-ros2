@@ -317,57 +317,66 @@ const RosViewer = () => {
   };
 
   // Przetwarzanie PointCloud2
-  const processPointCloud = (message) => {
-    try {
-      const points = [];
-      const colors = [];
+const processPointCloud = (message) => {
+  try {
+    const points = [];
+    const colors = [];
+    
+    const data = new Uint8Array(message.data);
+    const pointStep = message.point_step;
+    const numPoints = message.width * message.height;
+    
+    // Znajdź offsety z fields
+    const fields = message.fields;
+    const xOffset = fields.find(f => f.name === 'x')?.offset || 0;
+    const yOffset = fields.find(f => f.name === 'y')?.offset || 4;
+    const zOffset = fields.find(f => f.name === 'z')?.offset || 8;
+    
+    let validPoints = 0;
+    
+    // NAPRAW: DataView musi mieć cały buffer
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    
+    for (let i = 0; i < numPoints; i++) {
+      const offset = i * pointStep;
       
-      const data = new Uint8Array(message.data);
-      const pointStep = message.point_step;
-      const numPoints = message.width * message.height;
+      // ZABEZPIECZENIE
+      if (offset + zOffset + 4 > data.length) break;
       
-      const xOffset = 0;
-      const yOffset = 4;
-      const zOffset = 8;
+      const x = view.getFloat32(offset + xOffset, true);
+      const y = view.getFloat32(offset + yOffset, true);
+      const z = view.getFloat32(offset + zOffset, true);
       
-      let validPoints = 0;
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
       
-      for (let i = 0; i < numPoints; i++) {
-        const offset = i * pointStep;
-        
-        const x = new DataView(data.buffer).getFloat32(offset + xOffset, true);
-        const y = new DataView(data.buffer).getFloat32(offset + yOffset, true);
-        const z = new DataView(data.buffer).getFloat32(offset + zOffset, true);
-        
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-        
-        points.push(x, y, z);
-        validPoints++;
-        
-        const normalizedZ = Math.max(0, Math.min(1, (z + 2) / 4));
-        colors.push(1 - normalizedZ, normalizedZ * 0.5, normalizedZ);
-      }
+      points.push(x, y, z);
+      validPoints++;
       
-      if (pointCloudRef.current && points.length > 0) {
-        pointCloudRef.current.geometry.setAttribute(
-          'position',
-          new THREE.BufferAttribute(new Float32Array(points), 3)
-        );
-        pointCloudRef.current.geometry.setAttribute(
-          'color',
-          new THREE.BufferAttribute(new Float32Array(colors), 3)
-        );
-        
-        pointCloudRef.current.geometry.computeBoundingSphere();
-        pointCloudRef.current.geometry.attributes.position.needsUpdate = true;
-        pointCloudRef.current.geometry.attributes.color.needsUpdate = true;
-      }
-      
-      setPointCount(validPoints);
-    } catch (err) {
-      console.error('Błąd przetwarzania chmury punktów:', err);
+      const normalizedZ = Math.max(0, Math.min(1, (z + 2) / 4));
+      colors.push(1 - normalizedZ, normalizedZ * 0.5, normalizedZ);
     }
-  };
+    
+    if (pointCloudRef.current && points.length > 0) {
+      pointCloudRef.current.geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(points), 3)
+      );
+      pointCloudRef.current.geometry.setAttribute(
+        'color',
+        new THREE.BufferAttribute(new Float32Array(colors), 3)
+      );
+      
+      pointCloudRef.current.geometry.computeBoundingSphere();
+      pointCloudRef.current.geometry.attributes.position.needsUpdate = true;
+      pointCloudRef.current.geometry.attributes.color.needsUpdate = true;
+    }
+    
+    setPointCount(validPoints);
+  } catch (err) {
+    console.error('Błąd przetwarzania chmury punktów:', err);
+    console.log('Message:', message); // DEBUG
+  }
+};
 
   // Przetwarzanie Image
   const processImage = (message) => {
