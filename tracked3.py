@@ -1,11 +1,10 @@
-from pxr import UsdPhysics, UsdGeom, Gf
+from pxr import UsdPhysics, UsdGeom, Gf, PhysxSchema
 import omni.usd
 import omni.kit.commands
 
 stage = omni.usd.get_context().get_stage()
 
-# ===== POPRAWIONA ŚCIEŻKA =====
-TRACK_ROOT = "/World/g1/g1"  # <-- TUTAJ ZMIANA
+TRACK_ROOT = "/World/g1/g1"
 JOINT_ROOT = f"{TRACK_ROOT}/Joints"
 PREFIX = "DEFAULT_"
 
@@ -35,27 +34,44 @@ def ensure_path_exists(path):
             )
 
 def find_mesh_in_xform(xform_path):
-    """
-    Struktura: /World/g1/g1/DEFAULT_68/mesh (lub bezpośrednio mesh pod Xform)
-    """
     prim = stage.GetPrimAtPath(xform_path)
     if not prim.IsValid():
         return None
     
-    # Szukaj mesh w bezpośrednich dzieciach
     for child in prim.GetAllChildren():
         if child.GetTypeName() in ("Mesh", "Cube", "Sphere", "Capsule", "Cylinder"):
             return child
     
     return None
 
-def ensure_rigid_body(prim):
-    if prim is None:
+def setup_physics_on_mesh(mesh_prim):
+    """
+    Konfiguruje physics z CONVEX HULL zamiast triangle mesh
+    """
+    if mesh_prim is None:
         return
-    if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
-        UsdPhysics.RigidBodyAPI.Apply(prim)
-    if not prim.HasAPI(UsdPhysics.CollisionAPI):
-        UsdPhysics.CollisionAPI.Apply(prim)
+    
+    # RigidBody API
+    if not mesh_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        rb = UsdPhysics.RigidBodyAPI.Apply(mesh_prim)
+        rb.CreateRigidBodyEnabledAttr(True)
+    
+    # Collision API
+    if not mesh_prim.HasAPI(UsdPhysics.CollisionAPI):
+        UsdPhysics.CollisionAPI.Apply(mesh_prim)
+    
+    # KLUCZOWA ZMIANA: CONVEX HULL zamiast triangle mesh
+    if not mesh_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+        mesh_collision = UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
+        # "convexHull" zamiast domyślnego "meshSimplification"
+        mesh_collision.CreateApproximationAttr("convexHull")
+    else:
+        mesh_collision = UsdPhysics.MeshCollisionAPI(mesh_prim)
+        mesh_collision.GetApproximationAttr().Set("convexHull")
+    
+    # Masa i inne parametry
+    mass_api = UsdPhysics.MassAPI.Apply(mesh_prim)
+    mass_api.CreateMassAttr(0.5)  # 0.5 kg na element gąsienicy
 
 def get_world_transform(prim):
     xformable = UsdGeom.Xformable(prim)
@@ -70,6 +86,19 @@ def get_midpoint(p1, p2):
 
 # ===================== START =====================
 ensure_path_exists(JOINT_ROOT)
+
+print("🔧 KROK 1: Konfiguracja physics na wszystkich elementach...")
+configured = 0
+for idx in SEQUENCE:
+    xform_path = f"{TRACK_ROOT}/{PREFIX}{idx}"
+    mesh = find_mesh_in_xform(xform_path)
+    if mesh:
+        setup_physics_on_mesh(mesh)
+        configured += 1
+
+print(f"✅ Skonfigurowano {configured} elementów z convex hull\n")
+
+print("🔗 KROK 2: Tworzenie jointów...")
 created = 0
 skipped = 0
 
@@ -77,23 +106,16 @@ for i in range(len(SEQUENCE)):
     n0 = SEQUENCE[i]
     n1 = SEQUENCE[(i + 1) % len(SEQUENCE)]
     
-    # Ścieżki do Xform (nie mesh!)
     xform0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
     xform1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
     
-    # Znajdź mesh pod każdym Xform
     mesh0 = find_mesh_in_xform(xform0_path)
     mesh1 = find_mesh_in_xform(xform1_path)
     
     if mesh0 is None or mesh1 is None:
-        print(f"⚠️ Pomijam {PREFIX}{n0} lub {PREFIX}{n1} – brak mesh")
-        print(f"   Sprawdzałem: {xform0_path} i {xform1_path}")
+        print(f"⚠️ Pomijam {PREFIX}{n0} ↔ {PREFIX}{n1}")
         skipped += 1
         continue
-    
-    # === RIGID BODY + COLLISION ===
-    ensure_rigid_body(mesh0)
-    ensure_rigid_body(mesh1)
     
     # === WORLD TRANSFORMS ===
     xf0 = get_world_transform(mesh0)
@@ -104,15 +126,21 @@ for i in range(len(SEQUENCE)):
     
     joint_world_pos = get_midpoint(world_pos0, world_pos1)
     
-    # === LOCAL SPACE CONVERSION ===
+    # === KONWERSJA DO LOCAL SPACE ===
     inv_xf0 = xf0.GetInverse()
     inv_xf1 = xf1.GetInverse()
     
     local_pos0 = inv_xf0.Transform(joint_world_pos)
     local_pos1 = inv_xf1.Transform(joint_world_pos)
     
-    # === CREATE JOINT ===
+    # === TWORZENIE JOINTA ===
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
+    
+    # Usuń stary joint jeśli istnieje
+    old_joint = stage.GetPrimAtPath(joint_path)
+    if old_joint.IsValid():
+        stage.RemovePrim(joint_path)
+    
     omni.kit.commands.execute(
         "CreatePrim",
         prim_path=joint_path,
@@ -122,23 +150,40 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
     
-    # === BODY RELATIONS ===
+    # === RELACJE BODY ===
     joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
     joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
     
-    # === LOCAL POSITIONS ===
+    # === POZYCJE LOKALNE ===
     joint.CreateLocalPos0Attr().Set(local_pos0)
     joint.CreateLocalPos1Attr().Set(local_pos1)
     
-    # === JOINT PARAMETERS ===
-    joint.CreateAxisAttr("X")
-    joint.CreateLowerLimitAttr(-30.0)
-    joint.CreateUpperLimitAttr(30.0)
+    # === OŚ OBROTU ===
+    # Dla gąsienicy zwykle Y (pionowa) lub Z (głębokość)
+    joint.CreateAxisAttr("Y")  # Zmień na "Z" jeśli oś jest inna
+    
+    # === LIMITY KĄTOWE ===
+    joint.CreateLowerLimitAttr(-15.0)  # Mniejszy zakres dla stabilności
+    joint.CreateUpperLimitAttr(15.0)
+    
+    # === OPCJONALNIE: Damping i stiffness ===
+    # Zapobiega chaotycznym ruchom
+    if joint_prim.HasAPI(PhysxSchema.PhysxJointAPI):
+        physx_joint = PhysxSchema.PhysxJointAPI(joint_prim)
+    else:
+        physx_joint = PhysxSchema.PhysxJointAPI.Apply(joint_prim)
+    
+    # Tłumienie kątowe
+    physx_joint.CreateJointFrictionAttr(0.1)
     
     created += 1
     if created % 20 == 0:
         print(f"⏳ Utworzono {created}/{len(SEQUENCE)} jointów")
 
 print("\n✅ ZAKOŃCZONO")
-print(f"✔️ Utworzono: {created}")
+print(f"✔️ Utworzono jointów: {created}")
 print(f"⚠️ Pominięto: {skipped}")
+print("\n💡 WSKAZÓWKI:")
+print("   - Jeśli elementy nadal latają, sprawdź oś jointa (Y/Z/X)")
+print("   - Możesz zmniejszyć limity kątowe (-5° do 5°)")
+print("   - Upewnij się że masa pojazdu > suma mas gąsienicy")
