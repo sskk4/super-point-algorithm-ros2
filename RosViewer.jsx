@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import ROSLIB from 'roslib'; 
 
 const RosViewer = () => {
   const [connected, setConnected] = useState(false);
@@ -22,154 +23,30 @@ const RosViewer = () => {
   const pointCloudRef = useRef(null);
   const rosRef = useRef(null);
 
-  // Style inline (bez Tailwind!)
+  // Style inline
   const styles = {
-    container: {
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100vh',
-      background: '#1a1a2e',
-      color: 'white',
-      fontFamily: 'Arial, sans-serif'
-    },
-    header: {
-      background: '#16213e',
-      padding: '20px',
-      boxShadow: '0 2px 10px rgba(0,0,0,0.5)'
-    },
-    title: {
-      color: '#4a9eff',
-      marginBottom: '15px',
-      fontSize: '24px'
-    },
-    controls: {
-      display: 'grid',
-      gridTemplateColumns: '2fr 1fr',
-      gap: '15px',
-      marginBottom: '15px'
-    },
-    topicControls: {
-      display: 'grid',
-      gridTemplateColumns: '1fr 1fr',
-      gap: '15px',
-      marginBottom: '15px'
-    },
-    select: {
-      padding: '10px',
-      borderRadius: '5px',
-      border: '1px solid #444',
-      background: '#0f3460',
-      color: 'white',
-      fontSize: '14px',
-      cursor: 'pointer'
-    },
-    refreshButton: {
-      padding: '10px',
-      borderRadius: '5px',
-      border: '1px solid #4a9eff',
-      background: '#0f3460',
-      color: '#4a9eff',
-      fontSize: '13px',
-      cursor: 'pointer',
-      fontWeight: 'bold'
-    },
-    input: {
-      padding: '10px',
-      borderRadius: '5px',
-      border: '1px solid #444',
-      background: '#0f3460',
-      color: 'white',
-      fontSize: '14px'
-    },
-    button: {
-      padding: '10px 20px',
-      borderRadius: '5px',
-      border: 'none',
-      fontSize: '14px',
-      fontWeight: 'bold',
-      cursor: 'pointer',
-      transition: 'all 0.3s'
-    },
-    buttonConnect: {
-      background: '#16a085',
-      color: 'white'
-    },
-    buttonDisconnect: {
-      background: '#c0392b',
-      color: 'white'
-    },
-    error: {
-      background: '#c0392b',
-      padding: '10px',
-      borderRadius: '5px',
-      marginTop: '10px'
-    },
-    stats: {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(3, 1fr)',
-      gap: '10px',
-      marginTop: '15px'
-    },
-    stat: {
-      background: '#0f3460',
-      padding: '10px',
-      borderRadius: '5px',
-      textAlign: 'center'
-    },
-    statLabel: {
-      fontSize: '11px',
-      color: '#888'
-    },
-    statValue: {
-      fontSize: '20px',
-      fontWeight: 'bold',
-      color: '#4a9eff'
-    },
-    content: {
-      display: 'flex',
-      flex: 1,
-      gap: '10px',
-      padding: '10px',
-      overflow: 'hidden'
-    },
-    viewer3d: {
-      flex: 2,
-      position: 'relative',
-      background: '#0a0a0a',
-      borderRadius: '8px',
-      overflow: 'hidden'
-    },
-    imagePanel: {
-      flex: 1,
-      background: '#0f3460',
-      borderRadius: '8px',
-      padding: '15px',
-      display: 'flex',
-      flexDirection: 'column'
-    },
-    imageTitle: {
-      marginBottom: '10px',
-      fontSize: '16px',
-      color: '#4a9eff'
-    },
-    imageContainer: {
-      flex: 1,
-      background: '#000',
-      borderRadius: '5px',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      overflow: 'hidden'
-    },
-    image: {
-      maxWidth: '100%',
-      maxHeight: '100%',
-      objectFit: 'contain'
-    },
-    canvas: {
-      width: '100%',
-      height: '100%'
-    }
+    container: { display: 'flex', flexDirection: 'column', height: '100vh', background: '#1a1a2e', color: 'white', fontFamily: 'Arial, sans-serif' },
+    header: { background: '#16213e', padding: '20px', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' },
+    title: { color: '#4a9eff', marginBottom: '15px', fontSize: '24px' },
+    controls: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '15px', marginBottom: '15px' },
+    topicControls: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px', marginBottom: '15px' },
+    input: { padding: '10px', borderRadius: '5px', border: '1px solid #444', background: '#0f3460', color: 'white', fontSize: '14px' },
+    select: { padding: '10px', borderRadius: '5px', border: '1px solid #444', background: '#0f3460', color: 'white', fontSize: '14px', cursor: 'pointer' },
+    button: { padding: '10px 20px', borderRadius: '5px', border: 'none', fontSize: '14px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.3s' },
+    buttonConnect: { background: '#16a085', color: 'white' },
+    buttonDisconnect: { background: '#c0392b', color: 'white' },
+    refreshButton: { padding: '10px', borderRadius: '5px', border: '1px solid #4a9eff', background: '#0f3460', color: '#4a9eff', fontSize: '13px', cursor: 'pointer', fontWeight: 'bold' },
+    error: { background: '#c0392b', padding: '10px', borderRadius: '5px', marginTop: '10px' },
+    stats: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginTop: '15px' },
+    stat: { background: '#0f3460', padding: '10px', borderRadius: '5px', textAlign: 'center' },
+    statLabel: { fontSize: '11px', color: '#888' },
+    statValue: { fontSize: '20px', fontWeight: 'bold', color: '#4a9eff' },
+    content: { display: 'flex', flex: 1, gap: '10px', padding: '10px', overflow: 'hidden' },
+    viewer3d: { flex: 2, position: 'relative', background: '#0a0a0a', borderRadius: '8px', overflow: 'hidden' },
+    imagePanel: { flex: 1, background: '#0f3460', borderRadius: '8px', padding: '15px', display: 'flex', flexDirection: 'column' },
+    imageTitle: { marginBottom: '10px', fontSize: '16px', color: '#4a9eff' },
+    imageContainer: { flex: 1, background: '#000', borderRadius: '5px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+    image: { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }
   };
 
   // Inicjalizacja Three.js
@@ -180,12 +57,7 @@ const RosViewer = () => {
     scene.background = new THREE.Color(0x0a0a0a);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(
-      75,
-      mountRef.current.clientWidth / mountRef.current.clientHeight,
-      0.1,
-      1000
-    );
+    const camera = new THREE.PerspectiveCamera(75, mountRef.current.clientWidth / mountRef.current.clientHeight, 0.1, 1000);
     camera.position.set(5, 5, 5);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
@@ -209,11 +81,7 @@ const RosViewer = () => {
     scene.add(axesHelper);
 
     const geometry = new THREE.BufferGeometry();
-    const material = new THREE.PointsMaterial({
-      size: 0.05,
-      vertexColors: true,
-      sizeAttenuation: true
-    });
+    const material = new THREE.PointsMaterial({ size: 0.05, vertexColors: true, sizeAttenuation: true });
     const points = new THREE.Points(geometry, material);
     scene.add(points);
     pointCloudRef.current = points;
@@ -231,13 +99,11 @@ const RosViewer = () => {
     let angle = 0;
     const animate = () => {
       requestAnimationFrame(animate);
-      
       angle += 0.005;
       camera.position.x = Math.cos(angle) * 8;
       camera.position.z = Math.sin(angle) * 8;
       camera.position.y = 5;
       camera.lookAt(0, 0, 0);
-      
       renderer.render(scene, camera);
     };
     animate();
@@ -283,13 +149,11 @@ const RosViewer = () => {
   const changePointCloudTopic = (newTopic) => {
     if (!rosRef.current?.ros) return;
     
-    // Odsubskrybuj stary topic
     if (rosRef.current.pointCloudListener) {
       rosRef.current.pointCloudListener.unsubscribe();
     }
     
-    // Subskrybuj nowy topic
-    const listener = new window.ROSLIB.Topic({
+    const listener = new ROSLIB.Topic({
       ros: rosRef.current.ros,
       name: newTopic,
       messageType: 'sensor_msgs/PointCloud2'
@@ -305,13 +169,11 @@ const RosViewer = () => {
   const changeImageTopic = (newTopic) => {
     if (!rosRef.current?.ros) return;
     
-    // Odsubskrybuj stary topic
     if (rosRef.current.imageListener) {
       rosRef.current.imageListener.unsubscribe();
     }
     
-    // Subskrybuj nowy topic
-    const listener = new window.ROSLIB.Topic({
+    const listener = new ROSLIB.Topic({
       ros: rosRef.current.ros,
       name: newTopic,
       messageType: 'sensor_msgs/Image'
@@ -323,28 +185,48 @@ const RosViewer = () => {
     console.log('📷 Zmieniono topic obrazu na:', newTopic);
   };
 
+  // --- TUTAJ JEST GŁÓWNA POPRAWKA ---
+  const decodeBase64 = (base64String) => {
+    const binaryString = window.atob(base64String);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  };
+
   // Przetwarzanie PointCloud2
   const processPointCloud = (message) => {
     try {
       const points = [];
       const colors = [];
       
-      const data = new Uint8Array(message.data);
+      // FIX: Dekodujemy Base64 do Uint8Array
+      const data = decodeBase64(message.data);
+      
       const pointStep = message.point_step;
       const numPoints = message.width * message.height;
       
-      const xOffset = 0;
-      const yOffset = 4;
-      const zOffset = 8;
+      const fields = message.fields;
+      const xOffset = fields.find(f => f.name === 'x')?.offset ?? 0;
+      const yOffset = fields.find(f => f.name === 'y')?.offset ?? 4;
+      const zOffset = fields.find(f => f.name === 'z')?.offset ?? 8;
       
       let validPoints = 0;
+      
+      // FIX: Tworzymy DataView na poprawnym buforze
+      const view = new DataView(data.buffer);
       
       for (let i = 0; i < numPoints; i++) {
         const offset = i * pointStep;
         
-        const x = new DataView(data.buffer).getFloat32(offset + xOffset, true);
-        const y = new DataView(data.buffer).getFloat32(offset + yOffset, true);
-        const z = new DataView(data.buffer).getFloat32(offset + zOffset, true);
+        // Zabezpieczenie przed wyjściem poza zakres
+        if (offset + Math.max(xOffset, yOffset, zOffset) + 4 > data.byteLength) break;
+        
+        const x = view.getFloat32(offset + xOffset, true); // true = Little Endian
+        const y = view.getFloat32(offset + yOffset, true);
+        const z = view.getFloat32(offset + zOffset, true);
         
         if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
         
@@ -356,15 +238,8 @@ const RosViewer = () => {
       }
       
       if (pointCloudRef.current && points.length > 0) {
-        pointCloudRef.current.geometry.setAttribute(
-          'position',
-          new THREE.BufferAttribute(new Float32Array(points), 3)
-        );
-        pointCloudRef.current.geometry.setAttribute(
-          'color',
-          new THREE.BufferAttribute(new Float32Array(colors), 3)
-        );
-        
+        pointCloudRef.current.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(points), 3));
+        pointCloudRef.current.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
         pointCloudRef.current.geometry.computeBoundingSphere();
         pointCloudRef.current.geometry.attributes.position.needsUpdate = true;
         pointCloudRef.current.geometry.attributes.color.needsUpdate = true;
@@ -391,7 +266,9 @@ const RosViewer = () => {
       const ctx = canvas.getContext('2d');
       
       const imageData = ctx.createImageData(width, height);
-      const data = new Uint8Array(message.data);
+      
+      // FIX: Tutaj również dekodujemy Base64 dla obrazu
+      const data = decodeBase64(message.data);
       
       if (encoding === 'rgb8') {
         for (let i = 0; i < width * height; i++) {
@@ -428,35 +305,27 @@ const RosViewer = () => {
   const connectToROS = () => {
     setError('');
     
-    if (typeof window.ROSLIB === 'undefined') {
-      setError('⚠️ ROSLIB nie załadowany. Sprawdź internet lub zainstaluj lokalnie.');
-      return;
-    }
-    
     try {
-      const ros = new window.ROSLIB.Ros({ url: rosUrl });
+      const ros = new ROSLIB.Ros({ url: rosUrl });
 
       ros.on('connection', () => {
         console.log('✅ Połączono z ROS2');
         setConnected(true);
         setError('');
         
-        // Automatycznie pobierz listę topiców
         setTimeout(() => {
           rosRef.current = { ros };
           getTopics();
         }, 500);
         
-        // Subskrypcja chmury punktów
-        const pointCloudListener = new window.ROSLIB.Topic({
+        const pointCloudListener = new ROSLIB.Topic({
           ros: ros,
           name: selectedPointCloudTopic,
           messageType: 'sensor_msgs/PointCloud2'
         });
         pointCloudListener.subscribe(processPointCloud);
         
-        // Subskrypcja obrazu
-        const imageListener = new window.ROSLIB.Topic({
+        const imageListener = new ROSLIB.Topic({
           ros: ros,
           name: selectedImageTopic,
           messageType: 'sensor_msgs/Image'
@@ -468,7 +337,7 @@ const RosViewer = () => {
 
       ros.on('error', (error) => {
         console.error('❌ Błąd ROS:', error);
-        setError('Błąd połączenia: ' + error);
+        setError('Błąd połączenia: sprawdź konsolę (zazwyczaj CORS lub zły adres)');
         setConnected(false);
       });
 
@@ -484,15 +353,10 @@ const RosViewer = () => {
   };
 
   const disconnect = () => {
-    if (rosRef.current?.pointCloudListener) {
-      rosRef.current.pointCloudListener.unsubscribe();
-    }
-    if (rosRef.current?.imageListener) {
-      rosRef.current.imageListener.unsubscribe();
-    }
-    if (rosRef.current?.ros) {
-      rosRef.current.ros.close();
-    }
+    if (rosRef.current?.pointCloudListener) rosRef.current.pointCloudListener.unsubscribe();
+    if (rosRef.current?.imageListener) rosRef.current.imageListener.unsubscribe();
+    if (rosRef.current?.ros) rosRef.current.ros.close();
+    
     setConnected(false);
     setPointCount(0);
     setImageData(null);
@@ -501,30 +365,16 @@ const RosViewer = () => {
 
   return (
     <div style={styles.container}>
-      {/* Header */}
       <div style={styles.header}>
         <h1 style={styles.title}>🎯 ROS2 Viewer - Point Cloud + Image</h1>
         
         <div style={styles.controls}>
           <div>
             <label>ROS Bridge URL</label>
-            <input
-              type="text"
-              value={rosUrl}
-              onChange={(e) => setRosUrl(e.target.value)}
-              disabled={connected}
-              style={styles.input}
-            />
+            <input type="text" value={rosUrl} onChange={(e) => setRosUrl(e.target.value)} disabled={connected} style={styles.input} />
           </div>
-          
           <div>
-            <button
-              onClick={connected ? disconnect : connectToROS}
-              style={{
-                ...styles.button,
-                ...(connected ? styles.buttonDisconnect : styles.buttonConnect)
-              }}
-            >
+            <button onClick={connected ? disconnect : connectToROS} style={{ ...styles.button, ...(connected ? styles.buttonDisconnect : styles.buttonConnect) }}>
               {connected ? '🔴 Rozłącz' : '🟢 Połącz'}
             </button>
           </div>
@@ -532,60 +382,31 @@ const RosViewer = () => {
 
         {error && <div style={styles.error}>⚠️ {error}</div>}
 
-        {/* Wybór topiców */}
         {connected && (
           <div>
             <div style={styles.topicControls}>
               <div>
                 <label>📊 Point Cloud Topic</label>
-                <select
-                  value={selectedPointCloudTopic}
-                  onChange={(e) => changePointCloudTopic(e.target.value)}
-                  style={styles.select}
-                >
-                  {availableTopics
-                    .filter(t => t.type === 'sensor_msgs/PointCloud2' || t.type === 'sensor_msgs/msg/PointCloud2')
-                    .map(topic => (
-                      <option key={topic.name} value={topic.name}>
-                        {topic.name}
-                      </option>
-                    ))
-                  }
-                  {/* Fallback jeśli nie ma topiców */}
-                  {availableTopics.filter(t => t.type === 'sensor_msgs/PointCloud2' || t.type === 'sensor_msgs/msg/PointCloud2').length === 0 && (
-                    <option value={selectedPointCloudTopic}>{selectedPointCloudTopic}</option>
-                  )}
+                <select value={selectedPointCloudTopic} onChange={(e) => changePointCloudTopic(e.target.value)} style={styles.select}>
+                  {availableTopics.filter(t => t.type.includes('PointCloud2')).map(topic => (
+                    <option key={topic.name} value={topic.name}>{topic.name}</option>
+                  ))}
+                  {!availableTopics.some(t => t.type.includes('PointCloud2')) && <option value={selectedPointCloudTopic}>{selectedPointCloudTopic}</option>}
                 </select>
               </div>
 
               <div>
                 <label>📷 Image Topic</label>
-                <select
-                  value={selectedImageTopic}
-                  onChange={(e) => changeImageTopic(e.target.value)}
-                  style={styles.select}
-                >
-                  {availableTopics
-                    .filter(t => t.type === 'sensor_msgs/Image' || t.type === 'sensor_msgs/msg/Image')
-                    .map(topic => (
-                      <option key={topic.name} value={topic.name}>
-                        {topic.name}
-                      </option>
-                    ))
-                  }
-                  {/* Fallback jeśli nie ma topików */}
-                  {availableTopics.filter(t => t.type === 'sensor_msgs/Image' || t.type === 'sensor_msgs/msg/Image').length === 0 && (
-                    <option value={selectedImageTopic}>{selectedImageTopic}</option>
-                  )}
+                <select value={selectedImageTopic} onChange={(e) => changeImageTopic(e.target.value)} style={styles.select}>
+                  {availableTopics.filter(t => t.type.includes('Image')).map(topic => (
+                    <option key={topic.name} value={topic.name}>{topic.name}</option>
+                  ))}
+                  {!availableTopics.some(t => t.type.includes('Image')) && <option value={selectedImageTopic}>{selectedImageTopic}</option>}
                 </select>
               </div>
             </div>
 
-            <button 
-              onClick={getTopics} 
-              style={styles.refreshButton}
-              disabled={loadingTopics}
-            >
+            <button onClick={getTopics} style={styles.refreshButton} disabled={loadingTopics}>
               {loadingTopics ? '⏳ Ładowanie...' : '🔄 Odśwież listę topiców'}
             </button>
           </div>
@@ -593,36 +414,19 @@ const RosViewer = () => {
 
         {connected && (
           <div style={styles.stats}>
-            <div style={styles.stat}>
-              <div style={styles.statLabel}>Status</div>
-              <div style={styles.statValue}>Połączono</div>
-            </div>
-            <div style={styles.stat}>
-              <div style={styles.statLabel}>Punkty</div>
-              <div style={styles.statValue}>{pointCount}</div>
-            </div>
-            <div style={styles.stat}>
-              <div style={styles.statLabel}>Obraz</div>
-              <div style={styles.statValue}>{imageData ? '✓' : '✗'}</div>
-            </div>
+            <div style={styles.stat}><div style={styles.statLabel}>Status</div><div style={styles.statValue}>Połączono</div></div>
+            <div style={styles.stat}><div style={styles.statLabel}>Punkty</div><div style={styles.statValue}>{pointCount}</div></div>
+            <div style={styles.stat}><div style={styles.statLabel}>Obraz</div><div style={styles.statValue}>{imageData ? '✓' : '✗'}</div></div>
           </div>
         )}
       </div>
 
-      {/* Główna zawartość */}
       <div style={styles.content}>
-        {/* Panel 3D */}
         <div style={styles.viewer3d} ref={mountRef}></div>
-
-        {/* Panel obrazu */}
         <div style={styles.imagePanel}>
           <div style={styles.imageTitle}>📷 Camera Image</div>
           <div style={styles.imageContainer}>
-            {imageData ? (
-              <img src={imageData} alt="Camera feed" style={styles.image} />
-            ) : (
-              <div style={{ color: '#666' }}>Brak obrazu</div>
-            )}
+            {imageData ? <img src={imageData} alt="Camera feed" style={styles.image} /> : <div style={{ color: '#666' }}>Brak obrazu</div>}
           </div>
           <canvas ref={canvasRef} style={{ display: 'none' }} />
         </div>
