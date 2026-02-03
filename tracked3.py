@@ -4,7 +4,7 @@ import omni.kit.commands
 
 stage = omni.usd.get_context().get_stage()
 
-TRACK_ROOT = "/World/Robot/Track"
+TRACK_ROOT = "/World/g1"
 JOINT_ROOT = f"{TRACK_ROOT}/Joints"
 PREFIX = "DEFAULT_"
 
@@ -74,28 +74,31 @@ for i in range(len(SEQUENCE)):
     n0 = SEQUENCE[i]
     n1 = SEQUENCE[(i + 1) % len(SEQUENCE)]
 
-    xform0_path = f"{TRACK_ROOT}/{PREFIX}{n0}"
-    xform1_path = f"{TRACK_ROOT}/{PREFIX}{n1}"
+    path0 = f"{TRACK_ROOT}/{PREFIX}{n0}"
+    path1 = f"{TRACK_ROOT}/{PREFIX}{n1}"
 
-    mesh0 = find_mesh_prim(xform0_path)
-    mesh1 = find_mesh_prim(xform1_path)
+    prim0 = stage.GetPrimAtPath(path0)
+    prim1 = stage.GetPrimAtPath(path1)
 
-    if mesh0 is None or mesh1 is None:
-        print(f"⚠️ Pomijam {PREFIX}{n0} lub {PREFIX}{n1} – brak mesh")
+    if not prim0.IsValid() or not prim1.IsValid():
         skipped += 1
+        print(f"⚠️ Pomijam {path0} lub {path1}")
         continue
 
-    # === WYMUSZ RIGID BODY + COLLISION ===
-    ensure_rigid_body(mesh0)
-    ensure_rigid_body(mesh1)
+    # --- World positions
+    xf0 = UsdGeom.Xformable(prim0).ComputeLocalToWorldTransform(0)
+    xf1 = UsdGeom.Xformable(prim1).ComputeLocalToWorldTransform(0)
+    world0 = xf0.ExtractTranslation()
+    world1 = xf1.ExtractTranslation()
 
-    # === WORLD POSITIONS ===
-    world_pos0, xf0 = get_world_position(mesh0)
-    world_pos1, xf1 = get_world_position(mesh1)
+    # --- Punkt jointa w połowie między segmentami
+    joint_world = Gf.Vec3d(
+        (world0[0] + world1[0]) * 0.5,
+        (world0[1] + world1[1]) * 0.5,
+        (world0[2] + world1[2]) * 0.5,
+    )
 
-    joint_world_pos = get_midpoint(world_pos0, world_pos1)
-
-    # === CREATE JOINT ===
+    # --- Create joint
     joint_path = f"{JOINT_ROOT}/joint_{n0}_to_{n1}"
     omni.kit.commands.execute(
         "CreatePrim",
@@ -106,19 +109,22 @@ for i in range(len(SEQUENCE)):
     joint_prim = stage.GetPrimAtPath(joint_path)
     joint = UsdPhysics.RevoluteJoint(joint_prim)
 
-    # === WORLD -> LOCAL ===
-    local0 = xf0.GetInverse().Transform(joint_world_pos)
-    local1 = xf1.GetInverse().Transform(joint_world_pos)
+    # --- Local positions
+    # Body0 pivot = 0,0,0 (pivot w centrum segmentu)
+    local0 = Gf.Vec3d(0.0, 0.0, 0.0)
 
-    # === BODY RELATIONS ===
-    joint.CreateBody0Rel().SetTargets([mesh0.GetPath()])
-    joint.CreateBody1Rel().SetTargets([mesh1.GetPath()])
+    # Body1 offset = world1 → world joint
+    local1 = xf1.GetInverse().Transform(joint_world)
 
-    # === LOCAL POSITIONS ===
+    # --- Podłącz body
+    joint.CreateBody0Rel().SetTargets([path0])
+    joint.CreateBody1Rel().SetTargets([path1])
+
+    # --- Ustaw lokalne pozycje
     joint.CreateLocalPos0Attr(local0)
     joint.CreateLocalPos1Attr(local1)
 
-    # === PARAMETRY JOINTA ===
+    # --- Parametry jointa
     joint.CreateAxisAttr("X")
     joint.CreateLowerLimitAttr(-30.0)
     joint.CreateUpperLimitAttr(30.0)
@@ -130,3 +136,4 @@ for i in range(len(SEQUENCE)):
 print("\n✅ ZAKOŃCZONO")
 print(f"✔️ Utworzono: {created}")
 print(f"⚠️ Pominięto: {skipped}")
+
