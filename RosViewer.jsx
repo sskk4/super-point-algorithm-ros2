@@ -6,7 +6,7 @@ import * as ROSLIB from 'roslib';
 const RosViewer = () => {
   // --- STANY ---
   const [connected, setConnected] = useState(false);
-  const [rosUrl, setRosUrl] = useState('ws://10.0.0.59:9090');
+  const [rosUrl, setRosUrl] = useState('ws://192.168.1.100:9090');
   const [error, setError] = useState('');
   
   // Dane
@@ -28,19 +28,24 @@ const RosViewer = () => {
   const [rotationZ, setRotationZ] = useState(180);
   
   // DEBUG - Nowe parametry!
-  const [updateRate, setUpdateRate] = useState(10); // Hz - ile razy na sekundę aktualizować
-  const [downsample, setDownsample] = useState(1); // Co który punkt brać (1=wszystkie, 2=co drugi, etc)
-  const [minDistance, setMinDistance] = useState(0); // Minimalna odległość punktu od sensora
-  const [maxDistance, setMaxDistance] = useState(50); // Maksymalna odległość
+  const [updateRate, setUpdateRate] = useState(10);
+  const [downsample, setDownsample] = useState(1);
+  const [minDistance, setMinDistance] = useState(0);
+  const [maxDistance, setMaxDistance] = useState(50);
   const [showStats, setShowStats] = useState(true);
   const [debugMode, setDebugMode] = useState(false);
   
-  // TF Transform - nowe!
+  // ROI Filters - optymalizacja!
+  const [minZ, setMinZ] = useState(-3);
+  const [maxZ, setMaxZ] = useState(5);
+  const [voxelSize, setVoxelSize] = useState(0); // 0 = wyłączone, 0.05 = 5cm woksele
+  
+  // TF Transform
   const [offsetX, setOffsetX] = useState(0);
   const [offsetY, setOffsetY] = useState(0);
   const [offsetZ, setOffsetZ] = useState(0);
-  const [showOrigin, setShowOrigin] = useState(true); // Pokaż pozycję LIDARa
-  const [intensityFilter, setIntensityFilter] = useState(0); // Filtr intensywności (jeśli dostępne)
+  const [showOrigin, setShowOrigin] = useState(true);
+  const [intensityFilter, setIntensityFilter] = useState(0);
   
   // Wybór topiców
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState('/point_cloud_1');
@@ -210,15 +215,13 @@ const RosViewer = () => {
     return bytes;
   };
 
-  // --- PRZETWARZANIE CHMURY Z THROTTLING I FILTRAMI ---
+  // --- PRZETWARZANIE CHMURY - ZOPTYMALIZOWANE ---
   const processPointCloud = (message) => {
     try {
-      // THROTTLING - ogranicz częstotliwość aktualizacji
+      // THROTTLING
       const now = Date.now();
-      const minInterval = 1000 / updateRate; // ms
-      if (now - lastUpdateTimeRef.current < minInterval) {
-        return; // Pomiń tę ramkę
-      }
+      const minInterval = 1000 / updateRate;
+      if (now - lastUpdateTimeRef.current < minInterval) return;
       lastUpdateTimeRef.current = now;
 
       const data = decodeBase64(message.data);
@@ -229,7 +232,6 @@ const RosViewer = () => {
       const yOff = fields.find(f => f.name === 'y')?.offset ?? 4;
       const zOff = fields.find(f => f.name === 'z')?.offset ?? 8;
       
-      // Sprawdź czy są dane intensywności
       const intensityField = fields.find(f => f.name === 'intensity' || f.name === 'i');
       const hasIntensity = intensityField !== undefined;
       const intensityOff = hasIntensity ? intensityField.offset : 0;
@@ -237,18 +239,23 @@ const RosViewer = () => {
       const pointStep = message.point_step;
       const numPoints = message.width * message.height;
 
-      const newPositions = [];
-      const newColors = [];
+      // PRE-ALLOCATE TypedArrays (szybsze!)
+      const maxPossiblePoints = Math.ceil(numPoints / downsample);
+      const tempPositions = new Float32Array(maxPossiblePoints * 3);
+      const tempColors = new Float32Array(maxPossiblePoints * 3);
+      
+      // KWADRATY odległości (bez Math.sqrt!)
+      const minDistSq = minDistance * minDistance;
+      const maxDistSq = maxDistance * maxDistance;
 
-      const minZ = -3;
-      const maxZ = 5;
+      // Voxel grid dla downsamplingu (jeśli włączony)
+      const voxelMap = voxelSize > 0 ? new Map() : null;
+      
       const rangeZ = maxZ - minZ;
-
-      let processedCount = 0;
+      let validCount = 0;
       let filteredCount = 0;
-      let invalidCount = 0;
 
-      // DOWNSAMPLING + FILTROWANIE + TF TRANSFORM
+      // GŁÓWNA PĘTLA - ZOPTYMALIZOWANA
       for (let i = 0; i < numPoints; i += downsample) {
         const offset = i * pointStep;
         if (offset + 12 > data.length) break;
@@ -257,71 +264,99 @@ const RosViewer = () => {
         let y = view.getFloat32(offset + yOff, true);
         let z = view.getFloat32(offset + zOff, true);
 
-        // Walidacja
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
-          invalidCount++;
+        // 1. WALIDACJA (najszybsza)
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        if (x === 0 && y === 0 && z === 0) continue;
+
+        // 2. ROI Z-FILTER (przed obliczeniami!)
+        if (z < minZ || z > maxZ) {
+          filteredCount++;
           continue;
         }
-        
-        // FILTR INTENSYWNOŚCI (jeśli dostępne)
-        if (hasIntensity && intensityFilter > 0) {
-          const intensity = view.getFloat32(offset + intensityOff, true);
-          if (intensity < intensityFilter) {
+
+        // 3. DISTANCE FILTER (kwadrat - BEZ sqrt!)
+        const distSq = x*x + y*y + z*z;
+        if (distSq < minDistSq || distSq > maxDistSq) {
+          filteredCount++;
+          continue;
+        }
+
+        // 4. INTENSYWNOŚĆ (jeśli dostępne)
+        let intensity = 1;
+        if (hasIntensity) {
+          intensity = view.getFloat32(offset + intensityOff, true);
+          if (intensityFilter > 0 && intensity < intensityFilter) {
             filteredCount++;
             continue;
           }
         }
-        
-        // FILTR ODLEGŁOŚCI
-        const distance = Math.sqrt(x*x + y*y + z*z);
-        if (distance < minDistance || distance > maxDistance) {
-          filteredCount++;
-          continue;
-        }
 
-        // Dodatkowy filtr dla Isaac Sim - usuń punkty (0,0,0) tylko jeśli są DOKŁADNIE zero
-        if (x === 0 && y === 0 && z === 0) {
-          filteredCount++;
-          continue;
-        }
-
-        // ZASTOSUJ TF OFFSET (przesunięcie punktów)
+        // 5. TF TRANSFORM
         x += offsetX;
         y += offsetY;
         z += offsetZ;
 
-        newPositions.push(x, y, z);
-        processedCount++;
+        // 6. VOXEL GRID DOWNSAMPLING (opcjonalnie)
+        if (voxelMap) {
+          const vx = Math.floor(x / voxelSize);
+          const vy = Math.floor(y / voxelSize);
+          const vz = Math.floor(z / voxelSize);
+          const voxelKey = `${vx},${vy},${vz}`;
+          
+          if (voxelMap.has(voxelKey)) {
+            filteredCount++;
+            continue;
+          }
+          voxelMap.set(voxelKey, true);
+        }
 
-        // KOLOROWANIE
+        // 7. DODAJ PUNKT
+        const idx = validCount * 3;
+        tempPositions[idx] = x;
+        tempPositions[idx + 1] = y;
+        tempPositions[idx + 2] = z;
+
+        // 8. KOLOR
         if (colorMode === 'solid') {
-          newColors.push(1, 1, 1);
+          tempColors[idx] = tempColors[idx + 1] = tempColors[idx + 2] = 1;
         } else if (colorMode === 'distance') {
-          const norm = Math.min(distance / maxDistance, 1);
-          newColors.push(1 - norm, norm * 0.5, norm);
+          // Użyj sqrt tylko dla koloru (nie do filtrowania!)
+          const dist = Math.sqrt(distSq);
+          const norm = Math.min(dist / maxDistance, 1);
+          tempColors[idx] = 1 - norm;
+          tempColors[idx + 1] = norm * 0.5;
+          tempColors[idx + 2] = norm;
         } else if (colorMode === 'intensity' && hasIntensity) {
-          // Kolor według intensywności
-          const intensity = view.getFloat32(offset + intensityOff, true);
           const normInt = Math.min(intensity / 255, 1);
-          newColors.push(normInt, normInt, normInt);
+          tempColors[idx] = tempColors[idx + 1] = tempColors[idx + 2] = normInt;
         } else {
-          // Kolor według wysokości (domyślny)
+          // Wysokość (domyślny)
           let norm = (z - minZ) / rangeZ;
           norm = Math.max(0, Math.min(1, norm));
-          newColors.push(norm, 1 - Math.abs(0.5 - norm) * 2, 1 - norm);
+          tempColors[idx] = norm;
+          tempColors[idx + 1] = 1 - Math.abs(0.5 - norm) * 2;
+          tempColors[idx + 2] = 1 - norm;
         }
+
+        validCount++;
       }
 
-      // Debug info
+      // Debug
       if (debugMode) {
-        console.log(`📊 Punkty: ${numPoints} | Przetworzonych: ${processedCount} | Odfiltrowanych: ${filteredCount} | Nieprawidłowych: ${invalidCount}`);
-        if (hasIntensity) console.log('✅ Dane intensywności dostępne');
+        console.log(`📊 Surowe: ${numPoints} | Przetworzone: ${validCount} | Odfiltrowane: ${filteredCount}`);
+        if (hasIntensity) console.log('✅ Intensywność OK');
+        if (voxelMap) console.log(`🔲 Voxel ${voxelSize}m: ${voxelMap.size} komórek`);
       }
+
+      // Trim arrays do rzeczywistej wielkości
+      const finalPositions = tempPositions.slice(0, validCount * 3);
+      const finalColors = tempColors.slice(0, validCount * 3);
 
       // MAPOWANIE
       if (accumulatePoints) {
-        accumulatedPointsRef.current.push(...newPositions);
-        accumulatedColorsRef.current.push(...newColors);
+        // Konwertuj do zwykłych array dla akumulacji
+        accumulatedPointsRef.current.push(...Array.from(finalPositions));
+        accumulatedColorsRef.current.push(...Array.from(finalColors));
         
         const maxPointsCount = maxPoints * 3;
         if (accumulatedPointsRef.current.length > maxPointsCount) {
@@ -339,22 +374,23 @@ const RosViewer = () => {
           geometry.attributes.color.needsUpdate = true;
         }
         
-        setPointCount(processedCount);
+        setPointCount(validCount);
         setTotalPoints(accumulatedPointsRef.current.length / 3);
       } else {
-        if (pointCloudRef.current && newPositions.length > 0) {
+        // Tryb normalny - użyj TypedArray bezpośrednio
+        if (pointCloudRef.current && validCount > 0) {
           const geometry = pointCloudRef.current.geometry;
-          geometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
-          geometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
+          geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
+          geometry.setAttribute('color', new THREE.Float32BufferAttribute(finalColors, 3));
           geometry.computeBoundingSphere();
           geometry.attributes.position.needsUpdate = true;
           geometry.attributes.color.needsUpdate = true;
         }
-        setPointCount(processedCount);
-        setTotalPoints(processedCount);
+        setPointCount(validCount);
+        setTotalPoints(validCount);
       }
     } catch (err) {
-      console.error('Błąd przetwarzania chmury:', err);
+      console.error('❌ Błąd:', err);
     }
   };
 
@@ -457,7 +493,7 @@ const RosViewer = () => {
     <div style={styles.container}>
       {/* GÓRNY PASEK */}
       <div style={styles.header}>
-        <h2 style={styles.panelTitle}>ROS2 Pro Viewer</h2>
+        <h2 style={styles.panelTitle}>🚀 ROS2 Pro Viewer</h2>
         <div style={styles.controlGroup}>
           <input value={rosUrl} onChange={e=>setRosUrl(e.target.value)} style={styles.input} disabled={connected} />
           <button onClick={connected ? disconnect : connect} style={{...styles.button, ...(connected ? styles.btnDisconnect : styles.btnConnect)}}>
@@ -631,6 +667,34 @@ const RosViewer = () => {
                 💡 <b>Filtr odległości</b> = usuń punkty za blisko/daleko<br/>
                 💡 <b>TF Offset</b> = przesuń chmurę (czerwona kula = pozycja LIDARa)<br/>
                 💡 Czerwona kula pokazuje gdzie jest LIDAR
+              </div>
+
+              <hr style={{borderColor:'#444', margin:'12px 0'}} />
+
+              <div style={{...styles.sectionTitle, fontSize:'12px', color:'#3498db'}}>⚡ OPTYMALIZACJA</div>
+              
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Filtr Z min</span>
+                <span style={styles.valueDisplay}>{minZ.toFixed(1)}m</span>
+              </div>
+              <input type="range" min="-10" max="0" step="0.5" value={minZ} onChange={e => setMinZ(parseFloat(e.target.value))} style={styles.slider} />
+              
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Filtr Z max</span>
+                <span style={styles.valueDisplay}>{maxZ.toFixed(1)}m</span>
+              </div>
+              <input type="range" min="0" max="20" step="0.5" value={maxZ} onChange={e => setMaxZ(parseFloat(e.target.value))} style={styles.slider} />
+
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Voxel grid</span>
+                <span style={styles.valueDisplay}>{voxelSize === 0 ? 'OFF' : `${(voxelSize*100).toFixed(0)}cm`}</span>
+              </div>
+              <input type="range" min="0" max="0.5" step="0.05" value={voxelSize} onChange={e => setVoxelSize(parseFloat(e.target.value))} style={styles.slider} />
+
+              <div style={{marginTop:'8px', fontSize:'10px', color:'#888', lineHeight:'1.5'}}>
+                🚀 <b>Z-filter</b> = usuń punkty poza zakresem wysokości (szybkie!)<br/>
+                🔲 <b>Voxel grid</b> = jeden punkt na komórkę (mniej punktów, szybciej)<br/>
+                💡 Voxel 5cm = dobry kompromis jakość/prędkość
               </div>
             </div>
           )}
