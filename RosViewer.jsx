@@ -187,115 +187,77 @@ const RosViewer = () => {
   };
 
   // --- PRZETWARZANIE CHMURY Z THROTTLING I FILTRAMI ---
-  const processPointCloud = (message) => {
-    try {
-      // THROTTLING - ogranicz częstotliwość aktualizacji
-      const now = Date.now();
-      const minInterval = 1000 / updateRate; // ms
-      if (now - lastUpdateTimeRef.current < minInterval) {
-        return; // Pomiń tę ramkę
-      }
-      lastUpdateTimeRef.current = now;
+const processPointCloud = (message) => {
+  try {
+    const data = decodeBase64(message.data);
+    const view = new DataView(data.buffer);
 
-      const data = decodeBase64(message.data);
-      const view = new DataView(data.buffer);
-      
-      const fields = message.fields;
-      const xOff = fields.find(f => f.name === 'x')?.offset ?? 0;
-      const yOff = fields.find(f => f.name === 'y')?.offset ?? 4;
-      const zOff = fields.find(f => f.name === 'z')?.offset ?? 8;
-      const pointStep = message.point_step;
-      const numPoints = message.width * message.height;
+    const fields = message.fields;
+    const xOff = fields.find(f => f.name === 'x')?.offset ?? 0;
+    const yOff = fields.find(f => f.name === 'y')?.offset ?? 4;
+    const zOff = fields.find(f => f.name === 'z')?.offset ?? 8;
 
-      const newPositions = [];
-      const newColors = [];
+    const pointStep = message.point_step;
+    const numPoints = message.width * message.height;
 
-      const minZ = -2;
-      const maxZ = 3;
-      const rangeZ = maxZ - minZ;
+    const geometry = pointCloudRef.current.geometry;
+    const posAttr = geometry.getAttribute('position');
+    const colAttr = geometry.getAttribute('color');
 
-      let processedCount = 0;
-      let filteredCount = 0;
+    let count = 0;
+    let zMin = Infinity;
+    let zMax = -Infinity;
 
-      // DOWNSAMPLING + FILTROWANIE
-      for (let i = 0; i < numPoints; i += downsample) {
-        const offset = i * pointStep;
-        if (offset + 12 > data.length) break;
+    // --- pierwsza pętla: zbieranie punktów ---
+    for (let i = 0; i < numPoints; i += downsample) {
+      const offset = i * pointStep;
+      if (offset + 12 > data.length) break;
 
-        const x = view.getFloat32(offset + xOff, true);
-        const y = view.getFloat32(offset + yOff, true);
-        const z = view.getFloat32(offset + zOff, true);
+      const x = view.getFloat32(offset + xOff, true);
+      const y = view.getFloat32(offset + yOff, true);
+      const z = view.getFloat32(offset + zOff, true);
 
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-        
-        // FILTR ODLEGŁOŚCI
-        const distance = Math.sqrt(x*x + y*y + z*z);
-        if (distance < minDistance || distance > maxDistance) {
-          filteredCount++;
-          continue;
-        }
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
 
-        newPositions.push(x, y, z);
-        processedCount++;
+      // filtr wysokości (grunt)
+      if (z < -2.0 || z > 2.0) continue;
 
-        if (colorMode === 'solid') {
-          newColors.push(1, 1, 1);
-        } else if (colorMode === 'distance') {
-          // Kolor według odległości
-          const norm = Math.min(distance / maxDistance, 1);
-          newColors.push(1 - norm, norm * 0.5, norm);
-        } else {
-          // Kolor według wysokości
-          let norm = (z - minZ) / rangeZ;
-          norm = Math.max(0, Math.min(1, norm));
-          newColors.push(norm, 1 - Math.abs(0.5 - norm) * 2, 1 - norm);
-        }
-      }
+      const idx = count * 3;
+      posAttr.array[idx]     = x;
+      posAttr.array[idx + 1] = y;
+      posAttr.array[idx + 2] = z;
 
-      // Debug info
-      if (debugMode) {
-        console.log(`Punkty: ${numPoints} → Przetworzone: ${processedCount} | Odfiltrowane: ${filteredCount}`);
-      }
+      zMin = Math.min(zMin, z);
+      zMax = Math.max(zMax, z);
 
-      // MAPOWANIE
-      if (accumulatePoints) {
-        accumulatedPointsRef.current.push(...newPositions);
-        accumulatedColorsRef.current.push(...newColors);
-        
-        const maxPointsCount = maxPoints * 3;
-        if (accumulatedPointsRef.current.length > maxPointsCount) {
-          const excess = accumulatedPointsRef.current.length - maxPointsCount;
-          accumulatedPointsRef.current.splice(0, excess);
-          accumulatedColorsRef.current.splice(0, excess);
-        }
-        
-        if (pointCloudRef.current && accumulatedPointsRef.current.length > 0) {
-          const geometry = pointCloudRef.current.geometry;
-          geometry.setAttribute('position', new THREE.Float32BufferAttribute(accumulatedPointsRef.current, 3));
-          geometry.setAttribute('color', new THREE.Float32BufferAttribute(accumulatedColorsRef.current, 3));
-          geometry.computeBoundingSphere();
-          geometry.attributes.position.needsUpdate = true;
-          geometry.attributes.color.needsUpdate = true;
-        }
-        
-        setPointCount(processedCount);
-        setTotalPoints(accumulatedPointsRef.current.length / 3);
-      } else {
-        if (pointCloudRef.current && newPositions.length > 0) {
-          const geometry = pointCloudRef.current.geometry;
-          geometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
-          geometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
-          geometry.computeBoundingSphere();
-          geometry.attributes.position.needsUpdate = true;
-          geometry.attributes.color.needsUpdate = true;
-        }
-        setPointCount(processedCount);
-        setTotalPoints(processedCount);
-      }
-    } catch (err) {
-      console.error('Błąd przetwarzania chmury:', err);
+      count++;
+      if (count >= posAttr.array.length / 3) break;
     }
-  };
+
+    const rangeZ = Math.max(0.001, zMax - zMin);
+
+    // --- druga pętla: kolorowanie ---
+    for (let i = 0; i < count; i++) {
+      const z = posAttr.array[i * 3 + 2];
+      const norm = (z - zMin) / rangeZ;
+
+      colAttr.array[i * 3]     = norm;
+      colAttr.array[i * 3 + 1] = 1.0 - Math.abs(0.5 - norm) * 2.0;
+      colAttr.array[i * 3 + 2] = 1.0 - norm;
+    }
+
+    geometry.setDrawRange(0, count);
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    geometry.computeBoundingSphere();
+
+    setPointCount(count);
+    setTotalPoints(count);
+  } catch (e) {
+    console.error('PointCloud error:', e);
+  }
+};
+
 
   // Wyczyść mapę
   const clearMap = () => {
