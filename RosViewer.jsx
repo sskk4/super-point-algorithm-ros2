@@ -6,7 +6,7 @@ import * as ROSLIB from 'roslib';
 const RosViewer = () => {
   // --- STANY ---
   const [connected, setConnected] = useState(false);
-  const [rosUrl, setRosUrl] = useState('ws://192.168.1.100:9090');
+  const [rosUrl, setRosUrl] = useState('ws://10.0.0.59:9090');
   const [error, setError] = useState('');
   
   // Dane
@@ -18,13 +18,12 @@ const RosViewer = () => {
   // Konfiguracja widoku
   const [pointSize, setPointSize] = useState(0.05);
   const [colorMode, setColorMode] = useState('height');
-  const [accumulatePoints, setAccumulatePoints] = useState(false); // MAPOWANIE!
-  const [maxPoints, setMaxPoints] = useState(50000); // Limit punktów w mapie
+  const [accumulatePoints, setAccumulatePoints] = useState(false);
+  const [maxPoints, setMaxPoints] = useState(100000);
   
-  // Obroty sceny (nowe!)
-  const [rotationX, setRotationX] = useState(0);
-  const [rotationY, setRotationY] = useState(0);
-  const [rotationZ, setRotationZ] = useState(0);
+  // Obroty sceny - STAŁE (bez suwaków)
+  const rotationX = -90; // Zawsze -90°
+  const rotationZ = 180; // Zawsze 180°
   
   // Wybór topiców
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState('/point_cloud_1');
@@ -138,14 +137,14 @@ const RosViewer = () => {
     }
   }, [pointSize]);
 
-  // Aktualizacja rotacji
+  // Aktualizacja rotacji - STAŁA
   useEffect(() => {
     if (pointCloudRef.current) {
       pointCloudRef.current.rotation.x = rotationX * Math.PI / 180;
-      pointCloudRef.current.rotation.y = rotationY * Math.PI / 180;
+      pointCloudRef.current.rotation.y = 0;
       pointCloudRef.current.rotation.z = rotationZ * Math.PI / 180;
     }
-  }, [rotationX, rotationY, rotationZ]);
+  }, []); // Tylko raz przy montowaniu
 
   // --- DEKODOWANIE BASE64 ---
   const decodeBase64 = (base64String) => {
@@ -156,7 +155,7 @@ const RosViewer = () => {
     return bytes;
   };
 
-  // --- PRZETWARZANIE CHMURY Z MAPOWANIEM ---
+  // --- PRZETWARZANIE CHMURY Z MAPOWANIEM (POPRAWIONE) ---
   const processPointCloud = (message) => {
     try {
       const data = decodeBase64(message.data);
@@ -176,6 +175,7 @@ const RosViewer = () => {
       const maxZ = 3;
       const rangeZ = maxZ - minZ;
 
+      // POPRAWKA: Nie pomijaj punktów (0,0,0) - mogą być prawidłowe!
       for (let i = 0; i < numPoints; i++) {
         const offset = i * pointStep;
         if (offset + 12 > data.length) break;
@@ -184,8 +184,8 @@ const RosViewer = () => {
         const y = view.getFloat32(offset + yOff, true);
         const z = view.getFloat32(offset + zOff, true);
 
+        // Tylko sprawdź czy są skończone
         if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-        if (x === 0 && y === 0 && z === 0) continue;
 
         newPositions.push(x, y, z);
 
@@ -198,13 +198,13 @@ const RosViewer = () => {
         }
       }
 
-      // MAPOWANIE - akumulacja punktów
+      // MAPOWANIE - z lepszą akumulacją
       if (accumulatePoints) {
-        // Dodaj nowe punkty do bufora
+        // Dodaj wszystkie nowe punkty
         accumulatedPointsRef.current.push(...newPositions);
         accumulatedColorsRef.current.push(...newColors);
         
-        // Ogranicz liczbę punktów (FIFO - usuwaj najstarsze)
+        // Ogranicz liczbę punktów (FIFO)
         const maxPointsCount = maxPoints * 3;
         if (accumulatedPointsRef.current.length > maxPointsCount) {
           const excess = accumulatedPointsRef.current.length - maxPointsCount;
@@ -225,7 +225,7 @@ const RosViewer = () => {
         setPointCount(newPositions.length / 3);
         setTotalPoints(accumulatedPointsRef.current.length / 3);
       } else {
-        // Tryb normalny - tylko aktualna ramka
+        // Tryb normalny
         if (pointCloudRef.current && newPositions.length > 0) {
           const geometry = pointCloudRef.current.geometry;
           geometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
@@ -341,7 +341,7 @@ const RosViewer = () => {
     <div style={styles.container}>
       {/* GÓRNY PASEK */}
       <div style={styles.header}>
-        <h2 style={styles.panelTitle}>🚀 ROS2 Pro Viewer</h2>
+        <h2 style={styles.panelTitle}>ROS2-Viewer</h2>
         <div style={styles.controlGroup}>
           <input value={rosUrl} onChange={e=>setRosUrl(e.target.value)} style={styles.input} disabled={connected} />
           <button onClick={connected ? disconnect : connect} style={{...styles.button, ...(connected ? styles.btnDisconnect : styles.btnConnect)}}>
@@ -396,7 +396,7 @@ const RosViewer = () => {
             {/* MAPOWANIE */}
             <div style={{...styles.settingRow, marginTop:'15px', background:'#1a3a5a', padding:'10px', borderRadius:'4px'}}>
               <div>
-                <div style={{...styles.label, color:'#4a9eff', fontWeight:'bold'}}>🗺️ MAPOWANIE</div>
+                <div style={{...styles.label, color:'#4a9eff', fontWeight:'bold'}}>MAPOWANIE</div>
                 <div style={{fontSize:'10px', color:'#888', marginTop:'3px'}}>Buduj mapę z ruchu robota</div>
               </div>
               <input type="checkbox" checked={accumulatePoints} onChange={e => {
@@ -408,42 +408,14 @@ const RosViewer = () => {
             {accumulatePoints && (
               <div>
                 <div style={styles.settingRow}>
-                  <span style={styles.label}>Max punktów: {maxPoints}</span>
+                  <span style={styles.label}>Max punktów: {maxPoints.toLocaleString()}</span>
                 </div>
-                <input type="range" min="10000" max="200000" step="10000" value={maxPoints} onChange={e => setMaxPoints(parseInt(e.target.value))} style={{width: '100%'}} />
+                <input type="range" min="10000" max="500000" step="10000" value={maxPoints} onChange={e => setMaxPoints(parseInt(e.target.value))} style={{width: '100%'}} />
                 <button onClick={clearMap} style={{...styles.button, ...styles.btnSmall, width:'100%', marginTop:'10px', background:'#c0392b'}}>
                   🗑️ Wyczyść mapę
                 </button>
               </div>
             )}
-          </div>
-
-          <hr style={{borderColor:'#333', width:'100%'}} />
-
-          {/* OBROTY SCENY */}
-          <div>
-            <div style={styles.label}>OBRÓT SCENY (°)</div>
-            
-            <div style={styles.settingRow}>
-              <span style={styles.label}>Oś X: {rotationX}°</span>
-            </div>
-            <input type="range" min="-180" max="180" step="90" value={rotationX} onChange={e => setRotationX(parseInt(e.target.value))} style={{width: '100%'}} />
-            
-            <div style={styles.settingRow}>
-              <span style={styles.label}>Oś Y: {rotationY}°</span>
-            </div>
-            <input type="range" min="-180" max="180" step="90" value={rotationY} onChange={e => setRotationY(parseInt(e.target.value))} style={{width: '100%'}} />
-            
-            <div style={styles.settingRow}>
-              <span style={styles.label}>Oś Z: {rotationZ}°</span>
-            </div>
-            <input type="range" min="-180" max="180" step="90" value={rotationZ} onChange={e => setRotationZ(parseInt(e.target.value))} style={{width: '100%'}} />
-
-            <div style={styles.rotationControls}>
-              <button onClick={()=>{setRotationX(-90);setRotationY(0);setRotationZ(0)}} style={{...styles.button, ...styles.btnSmall}}>Z-up</button>
-              <button onClick={()=>{setRotationX(0);setRotationY(0);setRotationZ(0)}} style={{...styles.button, ...styles.btnSmall}}>Reset</button>
-              <button onClick={()=>{setRotationX(90);setRotationY(0);setRotationZ(180)}} style={{...styles.button, ...styles.btnSmall}}>Flip</button>
-            </div>
           </div>
           
           <div style={{marginTop:'auto', fontSize:'11px', color:'#555', borderTop:'1px solid #333', paddingTop:'10px'}}>
