@@ -6,7 +6,7 @@ import * as ROSLIB from 'roslib';
 const RosViewer = () => {
   // --- STANY ---
   const [connected, setConnected] = useState(false);
-  const [rosUrl, setRosUrl] = useState('ws://192.168.1.100:9090');
+  const [rosUrl, setRosUrl] = useState('ws://10.0.0.59:9090');
   const [error, setError] = useState('');
   
   // Dane
@@ -35,6 +35,13 @@ const RosViewer = () => {
   const [showStats, setShowStats] = useState(true);
   const [debugMode, setDebugMode] = useState(false);
   
+  // TF Transform - nowe!
+  const [offsetX, setOffsetX] = useState(0);
+  const [offsetY, setOffsetY] = useState(0);
+  const [offsetZ, setOffsetZ] = useState(0);
+  const [showOrigin, setShowOrigin] = useState(true); // Pokaż pozycję LIDARa
+  const [intensityFilter, setIntensityFilter] = useState(0); // Filtr intensywności (jeśli dostępne)
+  
   // Wybór topiców
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState('/point_cloud_1');
   const [selectedImageTopic, setSelectedImageTopic] = useState('/camera/image_raw');
@@ -50,6 +57,7 @@ const RosViewer = () => {
   // Bufor punktów
   const accumulatedPointsRef = useRef([]);
   const accumulatedColorsRef = useRef([]);
+  const originMarkerRef = useRef(null); // Marker pozycji LIDARa
   
   // Throttling dla update rate
   const lastUpdateTimeRef = useRef(0);
@@ -124,6 +132,14 @@ const RosViewer = () => {
     scene.add(points);
     pointCloudRef.current = points;
 
+    // Marker pozycji LIDARa (czerwona kula)
+    const originGeometry = new THREE.SphereGeometry(0.1, 16, 16);
+    const originMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const originMarker = new THREE.Mesh(originGeometry, originMaterial);
+    originMarker.visible = showOrigin;
+    scene.add(originMarker);
+    originMarkerRef.current = originMarker;
+
     const handleResize = () => {
       if (!mountRef.current) return;
       const w = mountRef.current.clientWidth;
@@ -177,6 +193,14 @@ const RosViewer = () => {
     }
   }, [rotationX, rotationY, rotationZ]);
 
+  // Aktualizacja pozycji origin marker i TF offset
+  useEffect(() => {
+    if (originMarkerRef.current) {
+      originMarkerRef.current.visible = showOrigin;
+      originMarkerRef.current.position.set(offsetX, offsetY, offsetZ);
+    }
+  }, [showOrigin, offsetX, offsetY, offsetZ]);
+
   // --- DEKODOWANIE BASE64 ---
   const decodeBase64 = (base64String) => {
     const binaryString = window.atob(base64String);
@@ -204,29 +228,49 @@ const RosViewer = () => {
       const xOff = fields.find(f => f.name === 'x')?.offset ?? 0;
       const yOff = fields.find(f => f.name === 'y')?.offset ?? 4;
       const zOff = fields.find(f => f.name === 'z')?.offset ?? 8;
+      
+      // Sprawdź czy są dane intensywności
+      const intensityField = fields.find(f => f.name === 'intensity' || f.name === 'i');
+      const hasIntensity = intensityField !== undefined;
+      const intensityOff = hasIntensity ? intensityField.offset : 0;
+      
       const pointStep = message.point_step;
       const numPoints = message.width * message.height;
 
       const newPositions = [];
       const newColors = [];
 
-      const minZ = -2;
-      const maxZ = 3;
+      const minZ = -3;
+      const maxZ = 5;
       const rangeZ = maxZ - minZ;
 
       let processedCount = 0;
       let filteredCount = 0;
+      let invalidCount = 0;
 
-      // DOWNSAMPLING + FILTROWANIE
+      // DOWNSAMPLING + FILTROWANIE + TF TRANSFORM
       for (let i = 0; i < numPoints; i += downsample) {
         const offset = i * pointStep;
         if (offset + 12 > data.length) break;
 
-        const x = view.getFloat32(offset + xOff, true);
-        const y = view.getFloat32(offset + yOff, true);
-        const z = view.getFloat32(offset + zOff, true);
+        let x = view.getFloat32(offset + xOff, true);
+        let y = view.getFloat32(offset + yOff, true);
+        let z = view.getFloat32(offset + zOff, true);
 
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        // Walidacja
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+          invalidCount++;
+          continue;
+        }
+        
+        // FILTR INTENSYWNOŚCI (jeśli dostępne)
+        if (hasIntensity && intensityFilter > 0) {
+          const intensity = view.getFloat32(offset + intensityOff, true);
+          if (intensity < intensityFilter) {
+            filteredCount++;
+            continue;
+          }
+        }
         
         // FILTR ODLEGŁOŚCI
         const distance = Math.sqrt(x*x + y*y + z*z);
@@ -235,17 +279,33 @@ const RosViewer = () => {
           continue;
         }
 
+        // Dodatkowy filtr dla Isaac Sim - usuń punkty (0,0,0) tylko jeśli są DOKŁADNIE zero
+        if (x === 0 && y === 0 && z === 0) {
+          filteredCount++;
+          continue;
+        }
+
+        // ZASTOSUJ TF OFFSET (przesunięcie punktów)
+        x += offsetX;
+        y += offsetY;
+        z += offsetZ;
+
         newPositions.push(x, y, z);
         processedCount++;
 
+        // KOLOROWANIE
         if (colorMode === 'solid') {
           newColors.push(1, 1, 1);
         } else if (colorMode === 'distance') {
-          // Kolor według odległości
           const norm = Math.min(distance / maxDistance, 1);
           newColors.push(1 - norm, norm * 0.5, norm);
+        } else if (colorMode === 'intensity' && hasIntensity) {
+          // Kolor według intensywności
+          const intensity = view.getFloat32(offset + intensityOff, true);
+          const normInt = Math.min(intensity / 255, 1);
+          newColors.push(normInt, normInt, normInt);
         } else {
-          // Kolor według wysokości
+          // Kolor według wysokości (domyślny)
           let norm = (z - minZ) / rangeZ;
           norm = Math.max(0, Math.min(1, norm));
           newColors.push(norm, 1 - Math.abs(0.5 - norm) * 2, 1 - norm);
@@ -254,7 +314,8 @@ const RosViewer = () => {
 
       // Debug info
       if (debugMode) {
-        console.log(`Punkty: ${numPoints} → Przetworzone: ${processedCount} | Odfiltrowane: ${filteredCount}`);
+        console.log(`📊 Punkty: ${numPoints} | Przetworzonych: ${processedCount} | Odfiltrowanych: ${filteredCount} | Nieprawidłowych: ${invalidCount}`);
+        if (hasIntensity) console.log('✅ Dane intensywności dostępne');
       }
 
       // MAPOWANIE
@@ -396,7 +457,7 @@ const RosViewer = () => {
     <div style={styles.container}>
       {/* GÓRNY PASEK */}
       <div style={styles.header}>
-        <h2 style={styles.panelTitle}>🚀 ROS2 Pro Viewer</h2>
+        <h2 style={styles.panelTitle}>ROS2 Pro Viewer</h2>
         <div style={styles.controlGroup}>
           <input value={rosUrl} onChange={e=>setRosUrl(e.target.value)} style={styles.input} disabled={connected} />
           <button onClick={connected ? disconnect : connect} style={{...styles.button, ...(connected ? styles.btnDisconnect : styles.btnConnect)}}>
@@ -445,6 +506,7 @@ const RosViewer = () => {
               <select style={{...styles.select, width:'auto', fontSize:'11px'}} value={colorMode} onChange={e => setColorMode(e.target.value)}>
                 <option value="height">Wysokość</option>
                 <option value="distance">Odległość</option>
+                <option value="intensity">Intensywność</option>
                 <option value="solid">Jednolity</option>
               </select>
             </div>
@@ -506,7 +568,7 @@ const RosViewer = () => {
           {/* DEBUG */}
           {debugMode && (
             <div style={{...styles.section, ...styles.debugSection}}>
-              <div style={styles.sectionTitle}>🐛 DEBUG</div>
+              <div style={styles.sectionTitle}>🐛 DEBUG & KALIBRACJA</div>
               
               <div style={styles.settingRow}>
                 <span style={styles.label}>Update Rate</span>
@@ -532,10 +594,43 @@ const RosViewer = () => {
               </div>
               <input type="range" min="1" max="100" step="1" value={maxDistance} onChange={e => setMaxDistance(parseInt(e.target.value))} style={styles.slider} />
 
-              <div style={{marginTop:'8px', fontSize:'10px', color:'#888'}}>
-                💡 Update Rate = ile razy/s aktualizować wizualizację<br/>
-                💡 Downsampling = co który punkt brać (mniej = szybciej)<br/>
-                💡 Filtr odległości = usuń punkty za blisko/daleko
+              <hr style={{borderColor:'#444', margin:'12px 0'}} />
+
+              <div style={{...styles.sectionTitle, fontSize:'12px', color:'#e67e22'}}>📍 POZYCJA LIDARA (TF Offset)</div>
+              
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Pokaż origin</span>
+                <input type="checkbox" checked={showOrigin} onChange={e => setShowOrigin(e.target.checked)} />
+              </div>
+
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Offset X</span>
+                <span style={styles.valueDisplay}>{offsetX.toFixed(2)}m</span>
+              </div>
+              <input type="range" min="-5" max="5" step="0.1" value={offsetX} onChange={e => setOffsetX(parseFloat(e.target.value))} style={styles.slider} />
+              
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Offset Y</span>
+                <span style={styles.valueDisplay}>{offsetY.toFixed(2)}m</span>
+              </div>
+              <input type="range" min="-5" max="5" step="0.1" value={offsetY} onChange={e => setOffsetY(parseFloat(e.target.value))} style={styles.slider} />
+              
+              <div style={styles.settingRow}>
+                <span style={styles.label}>Offset Z</span>
+                <span style={styles.valueDisplay}>{offsetZ.toFixed(2)}m</span>
+              </div>
+              <input type="range" min="-5" max="5" step="0.1" value={offsetZ} onChange={e => setOffsetZ(parseFloat(e.target.value))} style={styles.slider} />
+
+              <button onClick={()=>{setOffsetX(0);setOffsetY(0);setOffsetZ(0)}} style={{...styles.button, ...styles.btnSmall, width:'100%', marginTop:'8px'}}>
+                ↺ Reset offsetów
+              </button>
+
+              <div style={{marginTop:'12px', fontSize:'10px', color:'#888', lineHeight:'1.5'}}>
+                💡 <b>Update Rate</b> = ile razy/s aktualizować<br/>
+                💡 <b>Downsampling</b> = co który punkt (mniej = szybciej)<br/>
+                💡 <b>Filtr odległości</b> = usuń punkty za blisko/daleko<br/>
+                💡 <b>TF Offset</b> = przesuń chmurę (czerwona kula = pozycja LIDARa)<br/>
+                💡 Czerwona kula pokazuje gdzie jest LIDAR
               </div>
             </div>
           )}
