@@ -187,115 +187,150 @@ const RosViewer = () => {
   };
 
   // --- PRZETWARZANIE CHMURY Z THROTTLING I FILTRAMI ---
-  const processPointCloud = (message) => {
+const processPointCloud = (message) => {
     try {
-      // THROTTLING - ogranicz częstotliwość aktualizacji
-      const now = Date.now();
-      const minInterval = 1000 / updateRate; // ms
-      if (now - lastUpdateTimeRef.current < minInterval) {
-        return; // Pomiń tę ramkę
-      }
-      lastUpdateTimeRef.current = now;
+        // Throttling
+        const now = Date.now();
+        const minInterval = 1000 / updateRate;
+        if (now - lastUpdateTimeRef.current < minInterval) return;
+        lastUpdateTimeRef.current = now;
 
-      const data = decodeBase64(message.data);
-      const view = new DataView(data.buffer);
-      
-      const fields = message.fields;
-      const xOff = fields.find(f => f.name === 'x')?.offset ?? 0;
-      const yOff = fields.find(f => f.name === 'y')?.offset ?? 4;
-      const zOff = fields.find(f => f.name === 'z')?.offset ?? 8;
-      const pointStep = message.point_step;
-      const numPoints = message.width * message.height;
-
-      const newPositions = [];
-      const newColors = [];
-
-      const minZ = -2;
-      const maxZ = 3;
-      const rangeZ = maxZ - minZ;
-
-      let processedCount = 0;
-      let filteredCount = 0;
-
-      // DOWNSAMPLING + FILTROWANIE
-      for (let i = 0; i < numPoints; i += downsample) {
-        const offset = i * pointStep;
-        if (offset + 12 > data.length) break;
-
-        const x = view.getFloat32(offset + xOff, true);
-        const y = view.getFloat32(offset + yOff, true);
-        const z = view.getFloat32(offset + zOff, true);
-
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+        // Get raw data
+        const rawData = decodeBase64(message.data);
+        const view = new DataView(rawData.buffer);
         
-        // FILTR ODLEGŁOŚCI
-        const distance = Math.sqrt(x*x + y*y + z*z);
-        if (distance < minDistance || distance > maxDistance) {
-          filteredCount++;
-          continue;
+        const fields = message.fields;
+        const pointStep = message.point_step;
+        const numPoints = message.width * message.height;
+
+        // CRITICAL: Locate field offsets (default to -1 if not found)
+        const xOff = fields.find(f => f.name === 'x')?.offset ?? -1;
+        const yOff = fields.find(f => f.name === 'y')?.offset ?? -1;
+        const zOff = fields.find(f => f.name === 'z')?.offset ?? -1;
+        const rgbOff = fields.find(f => f.name === 'rgb' || f.name === 'rgba')?.offset ?? -1;
+        const intensityOff = fields.find(f => f.name === 'intensity')?.offset ?? -1;
+
+        // DEBUG: Log message structure
+        if (debugMode) {
+            console.log('=== PointCloud2 DEBUG ===');
+            console.log('Fields:', fields);
+            console.log(`Points: ${numPoints}, Step: ${pointStep} bytes`);
+            console.log(`Offsets - X:${xOff}, Y:${yOff}, Z:${zOff}, RGB:${rgbOff}, Intensity:${intensityOff}`);
+            console.log('First 2 points raw data (hex):');
+            for (let i=0; i<Math.min(2, numPoints); i++) {
+                const hex = Array.from(new Uint8Array(rawData, i*pointStep, 16))
+                    .map(b => b.toString(16).padStart(2, '0')).join(' ');
+                console.log(`Point ${i}: ${hex}`);
+            }
         }
 
-        newPositions.push(x, y, z);
-        processedCount++;
+        const newPositions = [];
+        const newColors = [];
 
-        if (colorMode === 'solid') {
-          newColors.push(1, 1, 1);
-        } else if (colorMode === 'distance') {
-          // Kolor według odległości
-          const norm = Math.min(distance / maxDistance, 1);
-          newColors.push(1 - norm, norm * 0.5, norm);
-        } else {
-          // Kolor według wysokości
-          let norm = (z - minZ) / rangeZ;
-          norm = Math.max(0, Math.min(1, norm));
-          newColors.push(norm, 1 - Math.abs(0.5 - norm) * 2, 1 - norm);
-        }
-      }
+        let zeroCount = 0;
+        let validCount = 0;
+        let skippedCount = 0;
 
-      // Debug info
-      if (debugMode) {
-        console.log(`Punkty: ${numPoints} → Przetworzone: ${processedCount} | Odfiltrowane: ${filteredCount}`);
-      }
+        for (let i = 0; i < numPoints; i += downsample) {
+            const offset = i * pointStep;
+            if (offset + 12 > rawData.length) break;
 
-      // MAPOWANIE
-      if (accumulatePoints) {
-        accumulatedPointsRef.current.push(...newPositions);
-        accumulatedColorsRef.current.push(...newColors);
-        
-        const maxPointsCount = maxPoints * 3;
-        if (accumulatedPointsRef.current.length > maxPointsCount) {
-          const excess = accumulatedPointsRef.current.length - maxPointsCount;
-          accumulatedPointsRef.current.splice(0, excess);
-          accumulatedColorsRef.current.splice(0, excess);
+            // Read coordinates
+            const x = (xOff >= 0) ? view.getFloat32(offset + xOff, true) : 0;
+            const y = (yOff >= 0) ? view.getFloat32(offset + yOff, true) : 0;
+            const z = (zOff >= 0) ? view.getFloat32(offset + zOff, true) : 0;
+
+            // Count zero points for debug
+            if (x === 0 && y === 0 && z === 0) {
+                zeroCount++;
+                // Skip zero points early to avoid processing
+                if (debugMode && i < 10) {
+                    console.warn(`Zero point at index ${i}, offset ${offset}`);
+                }
+                continue;
+            }
+
+            // Validate coordinates
+            if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+                skippedCount++;
+                continue;
+            }
+
+            // Distance filter
+            const distance = Math.sqrt(x*x + y*y + z*z);
+            if (distance < minDistance || distance > maxDistance) {
+                filteredCount++;
+                continue;
+            }
+
+            // COLOR PROCESSING - PRIORITIZE MESSAGE DATA
+            let r = 1, g = 1, b = 1; // Default white
+
+            if (rgbOff >= 0) {
+                // Handle packed RGB/RGBA (Isaac Sim often uses BGR order)
+                const packed = view.getUint32(offset + rgbOff, true);
+                if (debugMode && i < 5) {
+                    console.log(`Point ${i} packed RGB: 0x${packed.toString(16)}`);
+                }
+                // Extract B,G,R,A bytes (common ROS format[citation:3])
+                b = ((packed >> 0) & 0xFF) / 255.0;
+                g = ((packed >> 8) & 0xFF) / 255.0;
+                r = ((packed >> 16) & 0xFF) / 255.0;
+                // Alpha at >>24
+            } else if (intensityOff >= 0) {
+                // Use intensity for grayscale
+                const intensity = view.getFloat32(offset + intensityOff, true);
+                const norm = Math.min(Math.max(intensity, 0), 1);
+                r = g = b = norm;
+            } else {
+                // Fallback to height/distance coloring
+                if (colorMode === 'distance') {
+                    const norm = Math.min(distance / maxDistance, 1);
+                    r = 1 - norm;
+                    g = norm * 0.5;
+                    b = norm;
+                } else if (colorMode === 'height') {
+                    const minZ = -2, maxZ = 3;
+                    let norm = (z - minZ) / (maxZ - minZ);
+                    norm = Math.max(0, Math.min(1, norm));
+                    r = norm;
+                    g = 1 - Math.abs(0.5 - norm) * 2;
+                    b = 1 - norm;
+                }
+            }
+
+            newPositions.push(x, y, z);
+            newColors.push(r, g, b);
+            validCount++;
         }
-        
-        if (pointCloudRef.current && accumulatedPointsRef.current.length > 0) {
-          const geometry = pointCloudRef.current.geometry;
-          geometry.setAttribute('position', new THREE.Float32BufferAttribute(accumulatedPointsRef.current, 3));
-          geometry.setAttribute('color', new THREE.Float32BufferAttribute(accumulatedColorsRef.current, 3));
-          geometry.computeBoundingSphere();
-          geometry.attributes.position.needsUpdate = true;
-          geometry.attributes.color.needsUpdate = true;
+
+        // Update geometry
+        if (validCount > 0) {
+            const geometry = pointCloudRef.current.geometry;
+            geometry.setAttribute('position', 
+                new THREE.Float32BufferAttribute(newPositions, 3));
+            geometry.setAttribute('color', 
+                new THREE.Float32BufferAttribute(newColors, 3));
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
         }
-        
-        setPointCount(processedCount);
-        setTotalPoints(accumulatedPointsRef.current.length / 3);
-      } else {
-        if (pointCloudRef.current && newPositions.length > 0) {
-          const geometry = pointCloudRef.current.geometry;
-          geometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
-          geometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
-          geometry.computeBoundingSphere();
-          geometry.attributes.position.needsUpdate = true;
-          geometry.attributes.color.needsUpdate = true;
+
+        // Update stats with critical info
+        setPointCount(validCount);
+        if (debugMode) {
+            console.log(`Processed: ${validCount} valid, ${zeroCount} zero, ${skippedCount} skipped`);
+            if (zeroCount > numPoints * 0.5) {
+                console.error('WARNING: More than 50% points are (0,0,0)! Likely Isaac Sim issue[citation:1]');
+            }
         }
-        setPointCount(processedCount);
-        setTotalPoints(processedCount);
-      }
+
     } catch (err) {
-      console.error('Błąd przetwarzania chmury:', err);
+        console.error('Point cloud processing error:', err);
+        if (debugMode) {
+            console.error('Full message dump:', message);
+        }
     }
-  };
+};
 
   // Wyczyść mapę
   const clearMap = () => {
